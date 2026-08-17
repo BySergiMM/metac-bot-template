@@ -4,8 +4,8 @@
 fetch     -> pull every RESOLVED MiniBench question via the Metaculus API
 evaluate  -> score strategies against that dataset vs the community baseline
 
-Token comes from the METACULUS_TOKEN env var (a GitHub secret). Never logged.
-Only ever touches resolved questions, so it cannot violate the no-human-in-the-loop rule.
+Token comes from METACULUS_TOKEN (a GitHub secret). Never logged.
+Only ever touches resolved questions, so it cannot break the no-human-in-the-loop rule.
 """
 from __future__ import annotations
 import argparse, datetime as dt, json, math, os, sys, time
@@ -14,46 +14,79 @@ from collections import defaultdict
 
 API = "https://www.metaculus.com/api"
 PAGE = 100
-HEADERS_EXTRA = {"User-Agent": "minibench-backtest/1.0", "Accept": "application/json"}
+UA = {"User-Agent": "minibench-backtest/1.0", "Accept": "application/json"}
 
-def req(path, token, params=None):
-    url = API + path
-    if params:
-        url += "?" + urllib.parse.urlencode(params, doseq=True)
+def call(path, token, params):
+    """Return (status, parsed_or_none, raw_body). Never raises on HTTP errors."""
+    url = API + path + "?" + urllib.parse.urlencode(params, doseq=True)
     h = {"Authorization": "Token " + token}
-    h.update(HEADERS_EXTRA)
+    h.update(UA)
     r = urllib.request.Request(url, headers=h)
-    for i in range(5):
+    for i in range(4):
         try:
             with urllib.request.urlopen(r, timeout=60) as resp:
-                return json.loads(resp.read().decode())
+                body = resp.read().decode()
+                return resp.status, json.loads(body), body
         except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode()[:600]
+            except Exception:
+                pass
             if e.code == 429:
-                time.sleep(2 ** i); continue
-            raise
-    raise RuntimeError("gave up on " + path)
+                time.sleep(2 ** i)
+                continue
+            return e.code, None, body
+        except Exception as e:
+            return -1, None, str(e)
+    return -1, None, "retries exhausted"
 
-def rounds(token):
-    # MiniBench runs on a fixed 14-day cadence and every round is its own tournament
-    # slug (minibench-YYYY-MM-DD). Deriving them beats discovery: /api/tournaments/ 404s.
-    # Slugs that do not exist simply come back empty and are skipped.
+# Candidate query shapes. The API rejected the first guess with a bare 400, so we
+# try progressively simpler ones and keep whichever the server accepts.
+VARIANTS = [
+    ("tournaments+statuses+cp", lambda s, o: {"tournaments": s, "statuses": "resolved", "limit": PAGE, "offset": o, "with_cp": "true"}),
+    ("tournaments+statuses",    lambda s, o: {"tournaments": s, "statuses": "resolved", "limit": PAGE, "offset": o}),
+    ("tournaments only",        lambda s, o: {"tournaments": s, "limit": PAGE, "offset": o}),
+    ("tournament (singular)",   lambda s, o: {"tournament": s, "limit": PAGE, "offset": o}),
+    ("projects",                lambda s, o: {"projects": s, "limit": PAGE, "offset": o}),
+    ("search by slug",          lambda s, o: {"search": s, "limit": PAGE, "offset": o}),
+]
+CHOSEN = {"name": None, "fn": None}
+
+def probe(slug, token):
+    print("probing query shapes against " + slug)
+    for name, fn in VARIANTS:
+        code, data, body = call("/posts/", token, fn(slug, 0))
+        n = len(data.get("results", [])) if isinstance(data, dict) else 0
+        print("  " + name.ljust(24) + " -> http " + str(code) + "  results=" + str(n))
+        if code >= 400:
+            print("      body: " + body.replace(chr(10), " ")[:300])
+        if code == 200 and n > 0:
+            CHOSEN["name"], CHOSEN["fn"] = name, fn
+            print("  using: " + name)
+            return True
+    return False
+
+def posts(slug, token):
+    out, off = [], 0
+    while True:
+        code, data, body = call("/posts/", token, CHOSEN["fn"](slug, off))
+        if code != 200 or not isinstance(data, dict):
+            return out
+        res = data.get("results", [])
+        if not res:
+            return out
+        out += res
+        if not data.get("next"):
+            return out
+        off += PAGE
+
+def rounds():
     out = ["minibench"]
     d = dt.date(2026, 8, 10)
     for _ in range(26):
         d -= dt.timedelta(days=14)
         out.append("minibench-" + d.isoformat())
-    return out
-
-def posts(slug, token):
-    out, off = [], 0
-    while True:
-        d = req("/posts/", token, {"tournaments": slug, "statuses": "resolved",
-                                   "limit": PAGE, "offset": off, "with_cp": "true"})
-        res = d.get("results", [])
-        if not res: break
-        out += res
-        if not d.get("next"): break
-        off += PAGE
     return out
 
 def flatten(p, slug):
@@ -73,23 +106,21 @@ def do_fetch(a):
     token = os.environ.get("METACULUS_TOKEN")
     if not token:
         print("METACULUS_TOKEN missing", file=sys.stderr); return 2
-    rows, empty = [], 0
-    for s in rounds(token):
-        try:
-            ps = posts(s, token)
-        except urllib.error.HTTPError as e:
-            print("  " + s + ": http " + str(e.code)); empty += 1; continue
-        except Exception as e:
-            print("  " + s + ": FAILED " + str(e)); empty += 1; continue
+    if not probe("minibench-2026-07-27", token):
+        print("no query shape worked; see bodies above"); return 1
+    rows, skipped = [], 0
+    for s in rounds():
+        ps = posts(s, token)
         keep = [x for x in (flatten(p, s) for p in ps) if x]
         if not keep:
-            empty += 1; continue
+            skipped += 1; continue
         rows += keep
         print("  " + s + ": " + str(len(keep)))
     json.dump(rows, open(a.out, "w"), indent=1)
     nb = sum(1 for r in rows if r["type"] == "binary")
-    print("skipped " + str(empty) + " empty/missing rounds")
-    print("wrote " + str(len(rows)) + " questions (" + str(nb) + " binary) to " + a.out)
+    ncp = sum(1 for r in rows if r.get("community_prediction") is not None)
+    print("skipped " + str(skipped) + " empty rounds")
+    print("wrote " + str(len(rows)) + " questions (" + str(nb) + " binary, " + str(ncp) + " with community prediction)")
     return 0 if rows else 1
 
 def brier(p, o): return (p - o) ** 2
@@ -108,7 +139,7 @@ class Res:
         s.band[k].append(brier(p, o))
     def show(s):
         if not s.n:
-            print(s.name, "- nothing scored"); return
+            print(s.name + " - nothing scored"); return
         print(s.name)
         print("  n=" + str(s.n) + "  Brier=" + format(s.b / s.n, ".4f") + "  log=" + format(s.l / s.n, ".4f"))
         for b in range(10):
@@ -119,7 +150,7 @@ class Res:
         for k in sorted(s.band):
             v = s.band[k]
             print("    band " + k + ": Brier " + format(sum(v) / len(v), ".4f") + "  n=" + str(len(v)))
-        print()
+        print("")
 
 def do_eval(a):
     rows = json.load(open(a.dataset))
