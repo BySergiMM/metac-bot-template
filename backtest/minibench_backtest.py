@@ -18,7 +18,7 @@ def req(path, token, params=None):
     url = API + path
     if params:
         url += "?" + urllib.parse.urlencode(params, doseq=True)
-    r = urllib.request.Request(url, headers={"Authorization": "Token " + token})
+    r = urllib.request.Request(url, headers={"Authorization": "Token " + token, "User-Agent": "minibench-backtest/1.0", "Accept": "application/json"})
     for i in range(5):
         try:
             with urllib.request.urlopen(r, timeout=60) as resp:
