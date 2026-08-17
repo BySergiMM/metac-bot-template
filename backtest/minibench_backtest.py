@@ -8,17 +8,21 @@ Token comes from the METACULUS_TOKEN env var (a GitHub secret). Never logged.
 Only ever touches resolved questions, so it cannot violate the no-human-in-the-loop rule.
 """
 from __future__ import annotations
-import argparse, json, math, os, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, datetime as dt, json, math, os, sys, time
+import urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 
 API = "https://www.metaculus.com/api"
 PAGE = 100
+HEADERS_EXTRA = {"User-Agent": "minibench-backtest/1.0", "Accept": "application/json"}
 
 def req(path, token, params=None):
     url = API + path
     if params:
         url += "?" + urllib.parse.urlencode(params, doseq=True)
-    r = urllib.request.Request(url, headers={"Authorization": "Token " + token, "User-Agent": "minibench-backtest/1.0", "Accept": "application/json"})
+    h = {"Authorization": "Token " + token}
+    h.update(HEADERS_EXTRA)
+    r = urllib.request.Request(url, headers=h)
     for i in range(5):
         try:
             with urllib.request.urlopen(r, timeout=60) as resp:
@@ -30,17 +34,15 @@ def req(path, token, params=None):
     raise RuntimeError("gave up on " + path)
 
 def rounds(token):
-    slugs, off = set(), 0
-    while True:
-        d = req("/tournaments/", token, {"limit": PAGE, "offset": off})
-        res = d.get("results", d if isinstance(d, list) else [])
-        if not res: break
-        for t in res:
-            s = t.get("slug") or ""
-            if s.startswith("minibench"): slugs.add(s)
-        if not d.get("next"): break
-        off += PAGE
-    return sorted(slugs)
+    # MiniBench runs on a fixed 14-day cadence and every round is its own tournament
+    # slug (minibench-YYYY-MM-DD). Deriving them beats discovery: /api/tournaments/ 404s.
+    # Slugs that do not exist simply come back empty and are skipped.
+    out = ["minibench"]
+    d = dt.date(2026, 8, 10)
+    for _ in range(26):
+        d -= dt.timedelta(days=14)
+        out.append("minibench-" + d.isoformat())
+    return out
 
 def posts(slug, token):
     out, off = [], 0
@@ -71,20 +73,24 @@ def do_fetch(a):
     token = os.environ.get("METACULUS_TOKEN")
     if not token:
         print("METACULUS_TOKEN missing", file=sys.stderr); return 2
-    rows = []
-    rs = rounds(token)
-    print("rounds found:", len(rs))
-    for s in rs:
-        try: ps = posts(s, token)
+    rows, empty = [], 0
+    for s in rounds(token):
+        try:
+            ps = posts(s, token)
+        except urllib.error.HTTPError as e:
+            print("  " + s + ": http " + str(e.code)); empty += 1; continue
         except Exception as e:
-            print("  " + s + ": FAILED " + str(e)); continue
+            print("  " + s + ": FAILED " + str(e)); empty += 1; continue
         keep = [x for x in (flatten(p, s) for p in ps) if x]
+        if not keep:
+            empty += 1; continue
         rows += keep
         print("  " + s + ": " + str(len(keep)))
     json.dump(rows, open(a.out, "w"), indent=1)
     nb = sum(1 for r in rows if r["type"] == "binary")
+    print("skipped " + str(empty) + " empty/missing rounds")
     print("wrote " + str(len(rows)) + " questions (" + str(nb) + " binary) to " + a.out)
-    return 0
+    return 0 if rows else 1
 
 def brier(p, o): return (p - o) ** 2
 def logs(p, o):
@@ -101,13 +107,15 @@ class Res:
         k = "low" if p < 0.2 else "high" if p > 0.8 else "mid"
         s.band[k].append(brier(p, o))
     def show(s):
-        if not s.n: print(s.name, "- nothing scored"); return
+        if not s.n:
+            print(s.name, "- nothing scored"); return
         print(s.name)
         print("  n=" + str(s.n) + "  Brier=" + format(s.b / s.n, ".4f") + "  log=" + format(s.l / s.n, ".4f"))
         for b in range(10):
             o = s.buck.get(b, [])
-            if o: print("    " + str(b * 10) + "-" + str(b * 10 + 9) + "% -> actual " +
-                        format(sum(o) / len(o) * 100, ".1f") + "%  n=" + str(len(o)))
+            if o:
+                print("    " + str(b * 10) + "-" + str(b * 10 + 9) + "% -> actual " +
+                      format(sum(o) / len(o) * 100, ".1f") + "%  n=" + str(len(o)))
         for k in sorted(s.band):
             v = s.band[k]
             print("    band " + k + ": Brier " + format(sum(v) / len(v), ".4f") + "  n=" + str(len(v)))
@@ -119,7 +127,8 @@ def do_eval(a):
     print(str(len(rows)) + " questions, " + str(len(bins)) + " scorable binary")
     if not bins: return 1
     base = sum(1 for r in bins if r["resolution"] == "yes") / len(bins)
-    print("observed YES base rate: " + format(base, ".3f") + chr(10))
+    print("observed YES base rate: " + format(base, ".3f"))
+    print("")
     strategies = [("community prediction (baseline)", lambda r: r.get("community_prediction")),
                   ("constant base rate", lambda r: base),
                   ("flat 25 percent status quo", lambda r: 0.25)]
@@ -137,4 +146,5 @@ sub = ap.add_subparsers(dest="cmd", required=True)
 f = sub.add_parser("fetch"); f.add_argument("--out", default="dataset.json"); f.set_defaults(fn=do_fetch)
 e = sub.add_parser("evaluate"); e.add_argument("--dataset", default="dataset.json"); e.set_defaults(fn=do_eval)
 if __name__ == "__main__":
-    raise SystemExit(ap.parse_args().fn(ap.parse_args()))
+    args = ap.parse_args()
+    raise SystemExit(args.fn(args))
