@@ -8,7 +8,6 @@ from collections import defaultdict
 API = "https://www.metaculus.com/api"
 PAGE = 100
 UA = {"User-Agent": "minibench-backtest/1.0", "Accept": "application/json"}
-DUMPED = {"done": False}
 
 def call(path, token, params):
     url = API + path + "?" + urllib.parse.urlencode(params, doseq=True)
@@ -20,14 +19,9 @@ def call(path, token, params):
             with urllib.request.urlopen(r, timeout=45) as resp:
                 return resp.status, json.loads(resp.read().decode()), ""
         except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode()[:300]
-            except Exception:
-                pass
             if e.code in (429, 400):
                 time.sleep(1.5 * (i + 1)); continue
-            return e.code, None, body
+            return e.code, None, ""
         except Exception as e:
             return -1, None, str(e)[:120]
     return -2, None, "throttled"
@@ -35,7 +29,7 @@ def call(path, token, params):
 def posts(slug, token):
     out, off = [], 0
     while True:
-        code, data, body = call("/posts/", token, {"tournaments": slug, "statuses": "resolved", "limit": PAGE, "offset": off, "with_cp": "true"})
+        code, data, _ = call("/posts/", token, {"tournaments": slug, "statuses": "resolved", "limit": PAGE, "offset": off, "with_cp": "true"})
         if code != 200 or not isinstance(data, dict):
             return out, code
         res = data.get("results", [])
@@ -53,22 +47,29 @@ def rounds():
         out.append("minibench-" + d.isoformat())
     return out
 
+# Keys like actual_resolve_time also contain "resol"; excluding them is the whole
+# point here, an earlier version silently harvested timestamps as resolutions.
+BAD_HINTS = ("time", "criteria", "date", "count", "status")
+SKIP = ("", "none", "annulled", "ambiguous", "true", "false")
+
 def resolution_of(p):
     q = p.get("question") or {}
+    cands = []
+    for src in (q, p):
+        if "resolution" in src:
+            cands.append(src["resolution"])
     for src in (q, p):
         for k, v in src.items():
-            if "resol" in k.lower() and isinstance(v, (str, int, float)) and str(v) not in ("", "None", "True", "False"):
-                return v
+            kl = k.lower()
+            if kl != "resolution" and "resol" in kl and not any(h in kl for h in BAD_HINTS):
+                cands.append(v)
+    for v in cands:
+        if isinstance(v, (str, int, float)) and str(v).strip().lower() not in SKIP:
+            return v
     return None
 
 def flatten(p, slug):
     q = p.get("question") or {}
-    if not DUMPED["done"]:
-        DUMPED["done"] = True
-        print("FULL question keys: " + ",".join(sorted(q.keys())))
-        print("resol-ish in question: " + json.dumps({k: str(v)[:60] for k, v in q.items() if "resol" in k.lower()}))
-        print("resol-ish in post: " + json.dumps({k: str(v)[:60] for k, v in p.items() if "resol" in k.lower()}))
-        print("type=" + repr(q.get("type")) + " post.resolved=" + repr(p.get("resolved")))
     res = resolution_of(p)
     if res is None:
         return None
@@ -77,7 +78,7 @@ def flatten(p, slug):
     c = latest.get("centers") or []
     if c: cp = c[0]
     return {"id": p.get("id"), "round": slug, "title": p.get("title"),
-            "type": q.get("type") or "unknown", "resolution": str(res).lower(),
+            "type": q.get("type") or "unknown", "resolution": str(res).strip().lower(),
             "open_time": q.get("open_time"), "close_time": q.get("scheduled_close_time"),
             "community_prediction": cp}
 
@@ -90,17 +91,14 @@ def do_fetch(a):
         ps, code = posts(s, token)
         raw += len(ps)
         if code != 200:
-            print("  " + s + ": http " + str(code)); continue
+            continue
         keep = [x for x in (flatten(p, s) for p in ps) if x]
-        print("  " + s + ": " + str(len(keep)) + " kept of " + str(len(ps)))
+        if keep:
+            print("  " + s + ": " + str(len(keep)) + " of " + str(len(ps)))
         rows += keep
         time.sleep(0.5)
     json.dump(rows, open(a.out, "w"), indent=1)
-    types = defaultdict(int)
-    for r in rows: types[r["type"]] += 1
-    print("raw posts: " + str(raw))
-    print("types kept: " + json.dumps(dict(types)))
-    print("wrote " + str(len(rows)) + " questions")
+    print("raw posts: " + str(raw) + "  kept: " + str(len(rows)))
     return 0 if rows else 1
 
 def brier(p, o): return (p - o) ** 2
@@ -132,12 +130,13 @@ def do_eval(a):
     print("types: " + json.dumps(dict(types)))
     vals = defaultdict(int)
     for r in rows: vals[r["resolution"]] += 1
-    print("top resolutions: " + json.dumps(dict(sorted(vals.items(), key=lambda x: -x[1])[:8])))
-    bins = [r for r in rows if r["resolution"] in ("yes", "no")]
+    print("top resolutions: " + json.dumps(dict(sorted(vals.items(), key=lambda x: -x[1])[:6])))
+    bins = [r for r in rows if r["type"] == "binary" and r["resolution"] in ("yes", "no")]
     print(str(len(rows)) + " questions, " + str(len(bins)) + " yes/no scorable")
     if not bins: return 1
     base = sum(1 for r in bins if r["resolution"] == "yes") / len(bins)
-    print("observed YES base rate: " + format(base, ".3f") + chr(10))
+    print("observed YES base rate: " + format(base, ".3f"))
+    print("")
     for name, fn in [("community prediction (baseline)", lambda r: r.get("community_prediction")),
                      ("constant base rate", lambda r: base),
                      ("flat 25 percent status quo", lambda r: 0.25)]:
