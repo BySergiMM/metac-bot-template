@@ -204,6 +204,19 @@ def download_all(
                         entry["error"] = str(exc2)
                         entry["http_status"] = exc2.status
                         entry["body"] = exc2.body
+                        # Print it: a failure recorded only in a file that
+                        # lives on a discarded runner is a failure nobody sees.
+                        print(
+                            "  ! fallback download also failed (HTTP {0}): {1}".format(
+                                exc2.status, (exc2.body or "")[:300]
+                            )
+                        )
+                else:
+                    print(
+                        "  ! download failed (HTTP {0}): {1}".format(
+                            exc.status, (exc.body or "")[:300]
+                        )
+                    )
 
             if data is None:
                 log.append(entry)
@@ -463,6 +476,94 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """Probe the download endpoint's parameter space against a single post.
+
+    Written after the first real run returned 403 twice and the script reported
+    only "no question data returned". Guessing which parameter the gateway
+    dislikes would cost one push and one workflow run per guess; one matrix
+    answers it in a single run. Prints statuses only -- no question content.
+    """
+    token = read_token(args)
+    client = MetaculusReadClient(token, base_url=args.base_url)
+
+    account = probe(client)
+    user_id = account.get("user_id")
+    print("account   : user_id={0} username={1}".format(user_id, account.get("username")))
+    print("data tier : {0}".format(json.dumps(account.get("data_access_status"))))
+
+    posts = client.get_posts_forecasted_by(user_id, statuses=CLOSED_STATUSES)
+    print("\nposts we have forecast on (closed/resolved): {0}".format(len(posts)))
+    if not posts:
+        print("nothing to probe with")
+        return 1
+
+    # What the posts listing itself already gives us. If it carries our own
+    # forecast history, the download endpoint is not the only possible source.
+    sample = posts[0]
+    question = sample.get("question") or {}
+    print("\nshape of a post we forecast on (keys only, no content):")
+    print("  post keys     : {0}".format(sorted(sample.keys())))
+    print("  question keys : {0}".format(sorted(question.keys())))
+    for key in ("my_forecasts", "aggregations", "resolution", "type", "status"):
+        present = key in question
+        print("  question.{0:<14} present={1}".format(key, present))
+    my_forecasts = question.get("my_forecasts")
+    if isinstance(my_forecasts, dict):
+        print("  my_forecasts keys: {0}".format(sorted(my_forecasts.keys())))
+        history = my_forecasts.get("history")
+        print("  my_forecasts.history entries: {0}".format(
+            len(history) if isinstance(history, list) else "n/a"
+        ))
+        if isinstance(history, list) and history:
+            print("  history[0] keys: {0}".format(sorted(history[0].keys())))
+        scores = my_forecasts.get("scores")
+        if scores:
+            print("  my_forecasts.scores entries: {0}".format(len(scores)))
+            if isinstance(scores, list) and scores:
+                print("  scores[0] keys: {0}".format(sorted(scores[0].keys())))
+
+    post_id = sample.get("id")
+    question_id = question.get("id")
+
+    print("\n/api/data/download/ parameter matrix (post_id={0}):".format(post_id))
+    matrix: list[tuple[str, dict[str, Any]]] = [
+        ("bare post_ids", {"post_ids": [post_id]}),
+        ("post_ids + user data + scores", {
+            "post_ids": [post_id], "include_user_data": True, "include_scores": True,
+        }),
+        ("post_ids + user data only", {"post_ids": [post_id], "include_user_data": True}),
+        ("post_ids + scores only", {"post_ids": [post_id], "include_scores": True}),
+        ("post_ids, no user data", {"post_ids": [post_id], "include_user_data": False}),
+        ("single post_id param", {"post_id": post_id}),
+        ("question_id param", {"question_id": question_id}),
+        ("geometric_mean aggregation", {
+            "post_ids": [post_id], "aggregation_methods": "geometric_mean",
+        }),
+        ("recency_weighted aggregation", {
+            "post_ids": [post_id], "aggregation_methods": "recency_weighted",
+        }),
+    ]
+    for label, params in matrix:
+        try:
+            body, headers = client.get_bytes("/data/download/", params)
+            kind = "ZIP" if body[:2] == b"PK" else (headers.get("Content-Type") or "?")
+            names = ""
+            if body[:2] == b"PK":
+                import io as _io
+                import zipfile as _zip
+
+                with _zip.ZipFile(_io.BytesIO(body)) as archive:
+                    names = ",".join(sorted(archive.namelist()))
+            print("  {0:<32} 200  {1}  {2}".format(label, kind, names))
+        except MetaculusReadError as exc:
+            print("  {0:<32} {1}  {2}".format(
+                label, exc.status, (exc.body or "").replace("\n", " ")[:160]
+            ))
+    print("\nno question content was printed by this probe")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     problems = verify_dataset(args.verify)
     if problems:
@@ -502,6 +603,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the geometric_mean aggregation attempt",
     )
     parser.add_argument("--verify", default=None, help="verify an existing dataset directory and exit")
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="probe the download endpoint's parameter space and exit (prints statuses only)",
+    )
     return parser
 
 
@@ -509,6 +615,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.verify:
         return cmd_verify(args)
+    if args.diagnose:
+        return cmd_diagnose(args)
     return cmd_fetch(args)
 
 
