@@ -24,10 +24,14 @@ jobs:
           installer-parallel: true
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
-      # forecasting-tools defaults the researcher role to a model OpenRouter does
-      # not serve, which 404s every question. This activates the pinned llms block.
-      - name: Pin LLM models
-        run: python backtest/pin_models.py
+      # Activates the pinned llms block in main.py, then --check sends one tiny
+      # completion to each model. A dead model id is what broke every earlier run,
+      # and it is cheaper to find out here than four minutes into a bot run.
+      # Must go through poetry: --check imports litellm, which lives in the venv.
+      - name: Pin and verify LLM models
+        run: poetry run python backtest/pin_models.py --check
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       - name: Run bot
         run: |
           poetry run python main.py --mode test_questions
