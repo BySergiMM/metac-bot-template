@@ -53,6 +53,21 @@ class SchemaError(RuntimeError):
 # --------------------------------------------------------------------- values
 
 
+# A number is only a timestamp if it is implausible as anything else. The
+# floor (March 1973) stops a bare year like 2026 from being read as a moment in
+# 1970 -- Metaculus has no questions predating it, so nothing real is lost.
+_MIN_PLAUSIBLE_EPOCH = 1e8
+
+
+def _from_epoch(value: float) -> datetime | None:
+    if abs(value) < _MIN_PLAUSIBLE_EPOCH:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def parse_dt(value: Any) -> datetime | None:
     """Parse the timestamps Django's csv writer emits.
 
@@ -66,9 +81,28 @@ def parse_dt(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    # Metaculus mixes formats: question timestamps come back as ISO strings,
+    # but forecast start_time/end_time inside my_forecasts are Unix epoch
+    # floats. forecasting_tools handles both in _parse_api_date; missing the
+    # numeric case here produced a silent None that emptied the whole forecast
+    # window on the first real run.
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return _from_epoch(float(value))
+
     text = str(value).strip()
     if not text or text.lower() in ("none", "null", "nan"):
         return None
+
+    try:
+        numeric = float(text)
+    except ValueError:
+        pass
+    else:
+        return _from_epoch(numeric)
+
     text = text.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(text)

@@ -50,6 +50,26 @@ class ValueParsingTests(unittest.TestCase):
         self.assertEqual(parsed.tzinfo, timezone.utc)
         self.assertEqual(parsed.hour, 12)
 
+    def test_parses_unix_epoch_numbers(self):
+        """Forecast start_time/end_time inside my_forecasts are epoch floats,
+        not ISO strings. Missing this returned None silently and emptied the
+        forecast window on the first live run."""
+        self.assertEqual(
+            parse_dt(1755513889),
+            datetime(2025, 8, 18, 10, 44, 49, tzinfo=timezone.utc),
+        )
+        self.assertEqual(parse_dt(1755513889.472).microsecond, 472000)
+        self.assertEqual(parse_dt("1755513889.472"), parse_dt(1755513889.472))
+
+    def test_a_bare_year_is_not_read_as_an_epoch(self):
+        """"2026" is numeric but is not a moment in 1970."""
+        self.assertIsNone(parse_dt("2026"))
+        self.assertIsNone(parse_dt(2026))
+
+    def test_booleans_are_not_timestamps(self):
+        self.assertIsNone(parse_dt(True))
+        self.assertIsNone(parse_dt(False))
+
     def test_blank_and_garbage_are_none(self):
         for value in (None, "", "  ", "None", "null", "nan", "not a date"):
             self.assertIsNone(parse_dt(value), value)
