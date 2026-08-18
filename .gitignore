@@ -2,6 +2,11 @@
 benchmarks/
 sandbox.py
 
+# Downloaded Metaculus data. Metaculus' Terms of Use restrict redistribution
+# of API data, so datasets stay local and are never committed. Their
+# manifest.json records the hashes needed to identify them anyway.
+research/datasets/
+
 
 ### General gitignore ###
 

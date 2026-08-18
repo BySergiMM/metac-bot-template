@@ -1,0 +1,133 @@
+name: Research - Track Record (read-only)
+
+# RESEARCH ONLY. This workflow never forecasts.
+#
+# It downloads this bot's own already-scored history from Metaculus, scores it
+# offline, checks the reconstruction against Metaculus' published scores, and
+# publishes an aggregates-only summary.
+#
+# Safety properties, and how each is enforced rather than merely intended:
+#
+#   only GET            research/metaculus_read_api.py raises on any other verb
+#   only closed qs      fetch defaults to statuses=resolved,closed; --include-open
+#                       is NOT passed (using it would be human-in-the-loop)
+#   never main.py       this job deliberately does NOT run `poetry install`, so
+#                       forecasting-tools is absent and main.py cannot even import
+#   token never logged  it travels in an Authorization header, never in a URL or
+#                       a param, and is scoped to the single step that needs it
+#   data never leaves   the dataset is written to $RUNNER_TEMP, outside the
+#                       workspace, so no artifact path glob can reach it
+#   artifact is safe    export_safe_report.py builds the output from an explicit
+#                       allowlist and aborts if a banned field or a
+#                       credential-shaped string survives
+#
+# The repository is PUBLIC, which means workflow artifacts are world-readable.
+# That is why the artifact contains aggregates only, and why any mean over
+# fewer than three observations is suppressed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tournaments:
+        description: "Tournaments forming the coverage denominator (space separated)"
+        required: false
+        default: "33022 minibench"
+
+# Least privilege: this job reads the checkout and nothing else. It cannot
+# write to the repository, open a PR, or publish a package.
+permissions:
+  contents: read
+
+concurrency:
+  group: research-track-record
+  cancel-in-progress: false
+
+jobs:
+  track_record:
+    name: Fetch and analyse own track record
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No dependency installation anywhere in this job. The research lab is
+      # standard library only, which is what makes the "cannot run the
+      # forecaster" guarantee structural instead of a promise.
+      - name: Confirm the forecaster cannot run here
+        run: |
+          if python -c "import forecasting_tools" 2>/dev/null; then
+            echo "::error::forecasting-tools is importable; this job must not be able to forecast"
+            exit 1
+          fi
+          echo "forecasting-tools absent, as required"
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v
+
+      # $RUNNER_TEMP is outside $GITHUB_WORKSPACE, so the raw Metaculus data
+      # cannot be picked up by an artifact glob or committed by accident.
+      # The dispatch input goes through an env var rather than being
+      # interpolated into the shell line: `${{ }}` inside `run:` is textual
+      # substitution, so a crafted input would execute as script.
+      - name: Fetch own track record (GET only, closed questions only)
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          TOURNAMENTS: ${{ github.event.inputs.tournaments || '33022 minibench' }}
+        run: |
+          read -r -a tournaments <<< "$TOURNAMENTS"
+          python research/fetch_own_track_record.py \
+            --out "$RUNNER_TEMP/datasets" \
+            --tournaments "${tournaments[@]}"
+
+      # No METACULUS_TOKEN from here on: the remaining steps work on local files.
+      - name: Analyse
+        run: |
+          python research/analyze_track_record.py \
+            --root "$RUNNER_TEMP/datasets" \
+            --json "$RUNNER_TEMP/full_report.json"
+
+      - name: Build the publishable summary
+        run: |
+          python research/export_safe_report.py \
+            --in "$RUNNER_TEMP/full_report.json" \
+            --out-json milestone2_summary.json \
+            --out-text milestone2_report.txt
+
+      - name: Refuse to publish raw data
+        run: |
+          set -e
+          for f in milestone2_summary.json milestone2_report.txt; do
+            # grep on a missing file also returns non-zero, so existence is
+            # checked first -- otherwise "no file" would read as "no leak".
+            if [ ! -s "$f" ]; then
+              echo "::error::$f is missing or empty"
+              exit 1
+            fi
+            if grep -qiE 'metaculus\.com/questions|resolution_criteria|probability_of_resolution' "$f"; then
+              echo "::error::$f contains raw Metaculus content; not uploading"
+              exit 1
+            fi
+          done
+          # Nothing from the dataset directory may have leaked into the workspace.
+          if git status --porcelain | grep -vE 'milestone2_(summary\.json|report\.txt)' | grep -q .; then
+            echo "::error::unexpected files in the workspace after the run"
+            git status --porcelain
+            exit 1
+          fi
+          echo "publication checks passed"
+
+      - name: Upload aggregates-only summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: milestone2-track-record-summary
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            milestone2_summary.json
+            milestone2_report.txt
