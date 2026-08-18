@@ -40,7 +40,11 @@ python3 research/analyze_track_record.py              # report on the newest one
 | 2 | `GET /api/get-data-access-status/` | record which data tier this token has |
 | 3 | `GET /api/posts/?forecaster_id=<us>&statuses=resolved,closed` | every post we have forecast on |
 | 4 | `GET /api/posts/?tournaments=<id>` | the question universe, for coverage |
-| 5 | `GET /api/data/download/?post_ids=...` | a ZIP of CSVs, in chunks of 50 posts |
+| 5 | `GET /api/posts/<id>/` | our own `my_forecasts.history` per post |
+
+`--source download` selects the `/api/data/download/` CSV route instead. It
+is not the default because that endpoint is closed to accounts without the
+Bot Benchmarking tier (see §7).
 
 ### Why this is allowed
 
@@ -156,29 +160,18 @@ spot_timestamp = min(spot, actual_close_time)
 The lab **never** substitutes a proxy for an unavailable exact value. A missing
 input is reported as `UNAVAILABLE` with the missing term named.
 
-### The one open possibility
+### The possibility that was tested and refuted
 
-`/api/data/download/` accepts `aggregation_methods`, and `geometric_mean` is an
-accepted value (`utils/serializers.py::DataPostRequestSerializer`). For
-questions that are already resolved, `export_data_for_questions` puts them in
-`questions_with_revealed_cp` even for an ordinary account:
+Milestone 1 hypothesised that `geometric_mean` might be retrievable for already
+resolved questions, since `export_data_for_questions` places them in
+`questions_with_revealed_cp` even for an ordinary account. It was probed
+directly on 2026-08-18 and **refused**: the whole download endpoint is gated
+before that logic is reached, and `/api/posts/<id>/` returns `aggregations`
+with only an unpopulated `unweighted` entry.
 
-```python
-questions_with_revealed_cp = questions.filter(
-    Q(resolution__isnull=False) | Q(cp_reveal_time__isnull=True)
-    | Q(cp_reveal_time__lte=timezone.now())
-)
-```
-
-If that path survives the API gateway's aggregation restrictions, the exact
-denominator is retrievable for resolved questions and **the competition metric
-becomes exactly reproducible offline**. The fetch script therefore *attempts*
-the `geometric_mean` request first and falls back cleanly, recording the exact
-failure in `fetch_log.json`.
-
-This is a **hypothesis, not a claim**. It has not been tested against a real
-token. Do not repeat it as fact until `manifest.json` shows
-`aggregation_methods_present: ["geometric_mean"]`.
+Exact spot peer reproduction is therefore **not possible on this access tier**.
+Recording this as a settled negative rather than an open question is the point
+of having run the probe.
 
 ### If it fails: the valid proxy
 
@@ -270,40 +263,87 @@ dirty — a dirty tree means the commit alone does not identify the code that ra
 
 ## 7. Current results
 
-**Status: BLOCKED on a credential. The lab is built, tested and verified against
-synthetic data; it has never been run against real data.**
+First live run: 2026-08-18, GitHub Actions, workflow `Research - Track Record
+(read-only)`, dataset `track-record-20260818T224833Z-e0d8a8bb`.
 
-| Item | State |
+### The headline number
+
+| Tournament | Questions posed | Forecast by our bot | Coverage |
+|---|---:|---:|---:|
+| Summer FutureEval 2026 (33022) | 333 | 1 | **0.3%** |
+| MiniBench | 57 | 0 | **0.0%** |
+
+The leaderboard is a weighted **sum** of spot peer scores, and an unforecast
+question scores exactly 0. We are therefore forfeiting ~99.7% of the available
+points before any question of forecast quality arises. Uncovered by type:
+binary 166, numeric 77, multiple choice 53, discrete 36.
+
+This is the audit's dominant hypothesis confirmed with a direct measurement,
+and it dwarfs every other lever in the project.
+
+### What could not be measured, and why
+
+| Item | Result |
 |---|---|
-| Lab implemented | yes — 6 modules, 2 CLIs |
-| Test suite | 148 tests, all passing |
-| Endpoints verified reachable | yes — both `/users/me/` and `/data/download/` answer, returning HTTP 403 with an explicit "authenticated users only" message for an invalid token |
-| API contract | verified against the Metaculus server source, not guessed |
-| Real dataset fetched | **no** |
-| Spot peer reproduced | **unknown** — untestable without a dataset |
+| Questions resolved so far | 0 — nothing is scoreable yet |
+| Metaculus scores for our account | 0 rows |
+| Spot peer reproduced | **UNAVAILABLE** — no denominator, and nothing to reproduce yet |
+| Coverage reproduction vs Metaculus | not yet testable (needs a resolved question) |
+| Data access tier | `has_data_access: false` |
 
-The blocker is narrow and specific: **there is no `METACULUS_TOKEN` available on
-this machine.** The repository has no `.env`; the token exists only as a GitHub
-Actions secret, which by design cannot be read back out. The two ways to
-unblock:
+The validator's verdict is `NO GROUND TRUTH`, which is the correct and honest
+output: the instrument is built and runs end to end, but it has not yet been
+calibrated against Metaculus, because Metaculus has not yet scored anything of
+ours.
 
-1. Put the bot token in `.env` or `METACULUS_TOKEN` locally, then run the two
-   commands in section 1. Nothing else is required.
-2. Or run the fetch inside GitHub Actions, where the secret already exists, and
-   download the dataset as an artifact. This needs a new manual-dispatch
-   workflow to be committed and pushed first.
+### `/api/data/download/` is closed to us
 
-Until then, everything in this document about *our* numbers is a
-capability statement, not a result. The section will be replaced with real
-figures on the first successful fetch.
+Probed directly, every form is refused:
 
----
+```
+post_ids / post_id / question_id
+  403 "This endpoint is restricted to project-scoped exports, so the data must
+       be selected by project alone."
+project_id
+  403 "You can only export data for projects you've been granted access to."
+```
+
+With `has_data_access: false` there is no project we may export, so this route
+requires the Bot Benchmarking tier. The lab uses the posts API instead, which
+turned out to be **more** accurate for our purpose: the question payload
+carries `spot_scoring_time` explicitly, the field the CSV export omits.
+
+### The peer denominator is confirmed unavailable
+
+`/api/posts/<id>/` returns `aggregations` with a single method, `unweighted`,
+entirely unpopulated (`history: false, latest: false`). The Milestone 1
+hypothesis that resolved questions might expose `geometric_mean` is **refuted**.
+Exact spot peer reproduction is not possible on this access tier.
+
+### One bug the live run caught
+
+The first successful fetch reported `forecast window: None -> None` while
+carrying one forecast. `my_forecasts` history entries give `start_time` and
+`end_time` as Unix epoch floats, not ISO strings, and the parser silently
+returned `None`. That is not cosmetic: `is_active_at` would have found no
+forecast live at the spot instant, so **every** question would have scored
+coverage 0 once resolutions arrive — a wrong answer that looks like a real
+finding. Fixed, with regression tests.
+
+After the fix the lab independently recovered the forecast timestamp
+`2026-08-18T11:04:53Z`, which matches the tournament run seen in the CI logs
+for question 45179. Two independent sources, same instant.
+
+Note that both runs produced the same content digest `e0d8a8bb`: the raw data
+was identical and only the analysis changed. That is the separation working as
+intended — datasets are raw, analysis is derived.
 
 ## 8. Known limitations
 
-- **`spot_scoring_time` overrides are invisible.** The CSV export does not
-  include the per-question override, so where one exists our derived spot
-  instant is wrong. The coverage check detects this; it does not fix it.
+- **`spot_scoring_time` is now exact.** Superseded: the posts API does expose
+  the per-question override, so datasets built from that route carry it and the
+  spot instant is authoritative rather than inferred. Only download-route
+  datasets fall back to the CP-reveal rule.
 - **The peer denominator is not available** to an ordinary account. See §3.
 - **The universe is a snapshot.** Questions created and resolved between
   fetches are invisible to the coverage denominator, so true coverage may be
@@ -332,12 +372,14 @@ figures on the first successful fetch.
 | `research/provenance.py` | dataset identity, hashing, manifests, tamper detection |
 | `research/metaculus_read_api.py` | read-only API client; refuses non-GET |
 | `research/track_record.py` | typed readers for the three CSVs; spot-time derivation |
+| `research/posts_track_record.py` | builds the same CSV schema from the posts API |
+| `research/export_safe_report.py` | allowlist-built, publishable aggregates |
 | `research/scorer.py` | log score, Brier, coverage, spot peer; EXACT/PROXY/UNAVAILABLE tiers |
 | `research/validate.py` | reconstruction vs Metaculus; inversion diagnostic |
 | `research/coverage.py` | production and benchmark coverage |
 | `research/fetch_own_track_record.py` | CLI: build an immutable dataset |
 | `research/analyze_track_record.py` | CLI: score, validate, report |
-| `tests/` | 148 tests, standard library only |
+| `tests/` | 190 tests, standard library only |
 
 `backtest/minibench_backtest.py` is untouched and is superseded by this lab for
 anything involving our own performance.
