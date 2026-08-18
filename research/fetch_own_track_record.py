@@ -528,38 +528,85 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
     print("\n/api/data/download/ parameter matrix (post_id={0}):".format(post_id))
     matrix: list[tuple[str, dict[str, Any]]] = [
-        ("bare post_ids", {"post_ids": [post_id]}),
-        ("post_ids + user data + scores", {
-            "post_ids": [post_id], "include_user_data": True, "include_scores": True,
+        ("post_ids", {"post_ids": [post_id]}),
+        ("question_id", {"question_id": question_id}),
+        ("project_id 33022 (FE summer)", {"project_id": 33022}),
+        ("project_id + user data + scores", {
+            "project_id": 33022, "include_user_data": True, "include_scores": True,
         }),
-        ("post_ids + user data only", {"post_ids": [post_id], "include_user_data": True}),
-        ("post_ids + scores only", {"post_ids": [post_id], "include_scores": True}),
-        ("post_ids, no user data", {"post_ids": [post_id], "include_user_data": False}),
-        ("single post_id param", {"post_id": post_id}),
-        ("question_id param", {"question_id": question_id}),
-        ("geometric_mean aggregation", {
-            "post_ids": [post_id], "aggregation_methods": "geometric_mean",
+        ("project_id + geometric_mean", {
+            "project_id": 33022, "include_user_data": True, "include_scores": True,
+            "aggregation_methods": "geometric_mean",
         }),
-        ("recency_weighted aggregation", {
-            "post_ids": [post_id], "aggregation_methods": "recency_weighted",
-        }),
+        ("project_id of this post", {"project_id": sample.get("projects", {}).get("default_project", {}).get("id")}),
     ]
     for label, params in matrix:
+        if any(value is None for value in params.values()):
+            print("  {0:<34} skipped (no id available)".format(label))
+            continue
         try:
             body, headers = client.get_bytes("/data/download/", params)
-            kind = "ZIP" if body[:2] == b"PK" else (headers.get("Content-Type") or "?")
-            names = ""
             if body[:2] == b"PK":
                 import io as _io
                 import zipfile as _zip
 
                 with _zip.ZipFile(_io.BytesIO(body)) as archive:
-                    names = ",".join(sorted(archive.namelist()))
-            print("  {0:<32} 200  {1}  {2}".format(label, kind, names))
+                    names = archive.namelist()
+                    sizes = {n: archive.getinfo(n).file_size for n in names}
+                print("  {0:<34} 200  ZIP {1} bytes  {2}".format(
+                    label, len(body), json.dumps(sizes)
+                ))
+            else:
+                print("  {0:<34} 200  {1}".format(
+                    label, (headers.get("Content-Type") or "?")
+                ))
         except MetaculusReadError as exc:
-            print("  {0:<32} {1}  {2}".format(
-                label, exc.status, (exc.body or "").replace("\n", " ")[:160]
+            print("  {0:<34} {1}  {2}".format(
+                label, exc.status, (exc.body or "").replace("\n", " ")[:150]
             ))
+
+    print("\npost detail endpoint /api/posts/{0}/ :".format(post_id))
+    try:
+        detail = client.get_json("/posts/{0}/".format(post_id))
+        detail_question = detail.get("question") or {}
+        print("  question keys : {0}".format(sorted(detail_question.keys())))
+        mine = detail_question.get("my_forecasts")
+        if isinstance(mine, dict):
+            print("  my_forecasts keys : {0}".format(sorted(mine.keys())))
+            for field in ("history", "latest", "score_data"):
+                value = mine.get(field)
+                if isinstance(value, list):
+                    print("    {0}: list of {1}".format(field, len(value)))
+                    if value and isinstance(value[0], dict):
+                        print("      [0] keys: {0}".format(sorted(value[0].keys())))
+                elif isinstance(value, dict):
+                    print("    {0} keys: {1}".format(field, sorted(value.keys())))
+        else:
+            print("  my_forecasts : absent")
+        aggregations = detail_question.get("aggregations") or {}
+        print("  aggregations methods : {0}".format(sorted(aggregations.keys())))
+        for method, block in aggregations.items():
+            if isinstance(block, dict):
+                populated = {k: (len(v) if isinstance(v, list) else bool(v)) for k, v in block.items()}
+                print("    {0}: {1}".format(method, json.dumps(populated)))
+    except MetaculusReadError as exc:
+        print("  {0}  {1}".format(exc.status, (exc.body or "")[:150]))
+
+    print("\nleaderboard /api/leaderboards/project/33022/ :")
+    try:
+        board = client.get_json("/leaderboards/project/33022/")
+        if isinstance(board, dict):
+            print("  keys: {0}".format(sorted(board.keys())))
+            entries = board.get("entries")
+            if isinstance(entries, list):
+                print("  entries: {0}".format(len(entries)))
+                mine = [e for e in entries if (e.get("user") or {}).get("id") == user_id]
+                if entries and isinstance(entries[0], dict):
+                    print("  entry keys: {0}".format(sorted(entries[0].keys())))
+                print("  our entry present: {0}".format(bool(mine)))
+    except MetaculusReadError as exc:
+        print("  {0}  {1}".format(exc.status, (exc.body or "")[:150]))
+
     print("\nno question content was printed by this probe")
     return 0
 
