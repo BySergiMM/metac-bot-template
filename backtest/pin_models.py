@@ -31,11 +31,19 @@ Why the defaults are what they are
 ----------------------------------
 Metaculus's own FutureEval writeup found model choice to be the single largest
 differentiator between winning and losing bots, and that plain one-shot bots on
-frontier models placed top-5. So the forecaster role gets the strongest model
-that costs nothing: nemotron-3-ultra is a 550B reasoning model on OpenRouter's
-free tier. The parser has to emit structured output reliably, which the free
-Nvidia endpoints do not advertise, so that role alone uses a paid model - at
-roughly a thousandth of a cent per question.
+frontier models placed top-5. So the reasoning roles get the best model that
+costs nothing.
+
+The obvious pick, nemotron-3-ultra-550b, was measured and rejected: on OpenRouter's
+free tier it queued past 60s and timed out on 8 of 9 test questions. A model that
+does not answer inside the window scores zero, however good it is. nemotron-3.5-lightning
+is the free model built for latency, so that is what runs.
+
+The parser has to emit structured output reliably, which the free Nvidia endpoints
+do not advertise, so that role alone uses a paid model - at roughly a thousandth of
+a cent per question. It stays a bare string, exactly as the official template ships
+it: parsing is a few hundred tokens and never came close to the default timeout, so
+there is nothing to gain by varying it.
 
 Preflight
 ---------
@@ -55,11 +63,17 @@ import pathlib
 import sys
 
 DEFAULTS = {
-    "default": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-    "researcher": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-    "summarizer": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "default": "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "researcher": "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "summarizer": "openrouter/nvidia/nemotron-3.5-lightning:free",
     "parser": "openrouter/openai/gpt-4o-mini",
 }
+
+# forecasting-tools only applies a custom timeout to roles given as GeneralLlm;
+# a bare model string silently gets its 60s default. The free tier queues past
+# that, which showed up as `litellm.Timeout ... timeout passed=60.0` on 8 of 9
+# test questions. Hence: every role is a GeneralLlm, and the budget is generous.
+TIMEOUT_SECONDS = 180
 
 OVERRIDE_FILE = pathlib.Path(__file__).with_name("models.txt")
 
@@ -80,11 +94,15 @@ TEMPLATE = '''        llms={{
             "default": GeneralLlm(
                 model="{default}",
                 temperature=0.3,
-                timeout=120,
+                timeout={timeout},
                 allowed_tries=3,
             ),
-            "summarizer": "{summarizer}",
-            "researcher": "{researcher}",
+            "summarizer": GeneralLlm(
+                model="{summarizer}", timeout={timeout}, allowed_tries=3
+            ),
+            "researcher": GeneralLlm(
+                model="{researcher}", timeout={timeout}, allowed_tries=3
+            ),
             "parser": "{parser}",
         }},
 '''
@@ -114,7 +132,7 @@ def read_overrides(path: pathlib.Path) -> dict[str, str]:
 
 
 def build_block(models: dict[str, str]) -> str:
-    return TEMPLATE.format(**models)
+    return TEMPLATE.format(timeout=TIMEOUT_SECONDS, **models)
 
 
 def patch(src: str, models: dict[str, str]) -> str:
