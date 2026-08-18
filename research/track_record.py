@@ -171,6 +171,9 @@ class QuestionRow:
     resolution_known_time: datetime | None
     include_bots_in_aggregates: bool | None
     question_weight: float | None
+    # Present only in datasets built from the posts API. The CSV export omits
+    # it, which is why the fallback chain below exists at all.
+    explicit_spot_scoring_time: datetime | None = None
     raw: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -193,13 +196,15 @@ class QuestionRow:
             elif self.scheduled_close_time:       return self.scheduled_close_time
             return None
 
-        CAVEAT, and it is a real one: the first branch reads a per-question
-        ``spot_scoring_time`` override which the CSV export does **not**
-        contain. If a question carries an override we silently fall through to
-        the CP-reveal rule and get the wrong instant. This is why the validator
-        checks reproduced coverage against Metaculus' own Coverage column
-        rather than trusting this function.
+        The first branch reads the per-question ``spot_scoring_time``
+        override. The CSV export omits it, but the posts API does expose it, so
+        a dataset built from the posts API resolves this exactly instead of
+        falling through to the CP-reveal rule. When it is absent we fall
+        through and the validator's coverage check is what tells us whether
+        that guess was right.
         """
+        if self.explicit_spot_scoring_time:
+            return self.explicit_spot_scoring_time
         if self.cp_reveal_time and self.open_time and self.cp_reveal_time > self.open_time:
             return self.cp_reveal_time
         if self.actual_close_time:
@@ -366,6 +371,7 @@ def read_question_csv(text: str) -> list[QuestionRow]:
                 resolution_known_time=parse_dt(raw.get("Resolution Known Time")),
                 include_bots_in_aggregates=parse_bool(raw.get("Include Bots in Aggregates")),
                 question_weight=parse_float(raw.get("Question Weight")),
+                explicit_spot_scoring_time=parse_dt(raw.get("Spot Scoring Time")),
                 raw=dict(raw),
             )
         )

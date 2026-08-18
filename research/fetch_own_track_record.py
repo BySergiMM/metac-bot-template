@@ -59,6 +59,7 @@ from research.provenance import (  # noqa: E402
     verify_dataset,
     write_manifest,
 )
+from research.posts_track_record import build_csvs  # noqa: E402
 from research.track_record import (  # noqa: E402
     FORECAST_CSV,
     QUESTION_CSV,
@@ -287,8 +288,35 @@ def summarise(
     }
 
 
-def build_limitations(summary: dict[str, Any], fetch_log: list[dict[str, Any]]) -> list[str]:
+def build_limitations(
+    summary: dict[str, Any],
+    fetch_log: list[dict[str, Any]],
+    source: str = "download",
+    source_stats: dict[str, Any] | None = None,
+) -> list[str]:
     limitations: list[str] = []
+    source_stats = source_stats or {}
+    if source == "posts":
+        limitations.append(
+            "Built from the posts API, not /api/data/download/, which is closed "
+            "to accounts without the Bot Benchmarking tier (probed: post_ids -> "
+            "'project-scoped exports only', project_id -> 'only projects you've "
+            "been granted access to', has_data_access=false)."
+        )
+        limitations.append(
+            "Metaculus per-question scores are not available on this route, so "
+            "there is NO ground truth to validate the offline scorer against. "
+            "Coverage and log score are computed; neither has been checked "
+            "against Metaculus' own numbers."
+        )
+        unsupported = source_stats.get("unsupported_probability_types") or {}
+        if unsupported:
+            limitations.append(
+                "Probability-on-resolution could not be derived for question "
+                "type(s) {0}: the bucket index for continuous questions depends "
+                "on the question's scaling, and guessing it would produce a "
+                "plausible but wrong number.".format(json.dumps(unsupported))
+            )
     if "geometric_mean" not in summary.get("aggregation_methods_present", []):
         limitations.append(
             "No geometric_mean aggregate rows: the spot peer denominator is "
@@ -367,13 +395,44 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     print("\nFetching the question universe for coverage ...")
     universe = fetch_universe(client, args.tournaments, statuses=statuses)
 
-    print("\nDownloading own forecast/score data ...")
-    texts, fetch_log = download_all(client, post_ids, try_geometric_mean=not args.no_geometric_mean)
+    source_stats: dict[str, Any] = {}
+    if args.source == "download":
+        print("\nDownloading own forecast/score data via /api/data/download/ ...")
+        texts, fetch_log = download_all(
+            client, post_ids, try_geometric_mean=not args.no_geometric_mean
+        )
+        question_text = merge_csv_texts(texts[QUESTION_CSV])
+        forecast_text = merge_csv_texts(texts[FORECAST_CSV])
+        score_text = merge_csv_texts(texts[SCORE_CSV])
+    else:
+        # The posts route. /api/data/download/ is closed to accounts without
+        # the Bot Benchmarking tier -- probed and confirmed, see --diagnose --
+        # but the post detail endpoint returns our own forecast history, and
+        # the question payload carries resolution, question_weight and the
+        # authoritative spot_scoring_time.
+        print("\nFetching post details (our own forecasts) ...")
+        details: list[dict[str, Any]] = []
+        fetch_log = []
+        for post_id in post_ids:
+            try:
+                details.append(client.get_json("/posts/{0}/".format(post_id)))
+                fetch_log.append({"post_id": post_id, "status": "ok"})
+            except MetaculusReadError as exc:
+                print("  ! post {0}: HTTP {1}".format(post_id, exc.status))
+                fetch_log.append(
+                    {"post_id": post_id, "status": "error", "http_status": exc.status}
+                )
+        print("  retrieved {0}/{1} post details".format(len(details), len(post_ids)))
+        question_text, forecast_text, source_stats = build_csvs(
+            details, user_id, account.get("username")
+        )
+        # Metaculus does not expose per-question scores for our account on this
+        # route, so there is no ground truth to validate against. Saying so is
+        # the point; an empty file would look like "no scores exist".
+        score_text = ""
+        print("  derived: {0}".format(json.dumps(source_stats)))
 
-    question_text = merge_csv_texts(texts[QUESTION_CSV])
-    forecast_text = merge_csv_texts(texts[FORECAST_CSV])
-    score_text = merge_csv_texts(texts[SCORE_CSV])
-    if not question_text:
+    if not question_text.strip():
         raise SystemExit("no question data returned; refusing to write an empty dataset")
 
     summary = summarise(question_text, forecast_text, score_text, user_id)
@@ -450,6 +509,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 "data_access_status": account.get("data_access_status"),
             },
             request={
+                "source": args.source,
+                "source_stats": source_stats,
                 "include_user_data": True,
                 "include_scores": True,
                 "include_comments": False,
@@ -461,7 +522,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             git=git_info(REPO_ROOT),
             files=records,
             summary=summary,
-            limitations=build_limitations(summary, fetch_log),
+            limitations=build_limitations(summary, fetch_log, args.source, source_stats),
         )
         write_manifest(dataset_dir, manifest)
     finally:
@@ -643,6 +704,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-open",
         action="store_true",
         help="ALSO include still-open questions (human-in-the-loop risk; off by default)",
+    )
+    parser.add_argument(
+        "--source",
+        choices=["posts", "download"],
+        default="posts",
+        help=(
+            "posts (default): build from /api/posts/ + post details. "
+            "download: use /api/data/download/, which needs the Bot "
+            "Benchmarking data tier"
+        ),
     )
     parser.add_argument(
         "--no-geometric-mean",
