@@ -37,6 +37,11 @@ jobs:
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
+      # forecasting-tools assigns the researcher role to a model OpenRouter no
+      # longer serves, which 404s every question. This activates the pinned llms
+      # block in main.py so the run uses models that actually exist.
+      - name: Pin LLM models
+        run: python backtest/pin_models.py
       - name: Run bot
         run: |
           poetry run python main.py
