@@ -37,6 +37,13 @@ free tier. The parser has to emit structured output reliably, which the free
 Nvidia endpoints do not advertise, so that role alone uses a paid model - at
 roughly a thousandth of a cent per question.
 
+Preflight
+---------
+`python backtest/pin_models.py --check` additionally sends one tiny completion to
+every distinct model and exits 1 if any of them errors. That is what caught the
+dead `gpt-4o-search-preview` id: a model that 404s costs a whole tournament run,
+and the run is the scarce resource, not the token.
+
 Exits 1 if the anchor block is missing, so an upstream template change fails
 loudly instead of silently restoring the broken defaults.
 """
@@ -150,6 +157,27 @@ def selftest() -> None:
     tmp.unlink()
 
 
+def check_models(models: dict[str, str]) -> list[str]:
+    """One minimal completion per distinct model. Returns the failures."""
+    import litellm
+
+    failures = []
+    for model in sorted(set(models.values())):
+        try:
+            litellm.completion(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+                max_tokens=16,
+                timeout=60,
+            )
+            print(f"  ok    {model}")
+        except Exception as exc:  # noqa: BLE001 - any failure here is disqualifying
+            head = str(exc).replace("\n", " ")[:300]
+            print(f"  FAIL  {model}: {head}")
+            failures.append(model)
+    return failures
+
+
 def main() -> int:
     selftest()
 
@@ -175,13 +203,21 @@ def main() -> int:
 
     if patched == src:
         print("llms block already active, nothing to do")
-        return 0
+    else:
+        ast.parse(patched)
+        path.write_text(patched)
+        for role in ("default", "researcher", "summarizer", "parser"):
+            mark = " (from models.txt)" if role in overrides else ""
+            print(f"  {role:<11} {models[role]}{mark}")
 
-    ast.parse(patched)
-    path.write_text(patched)
-    for role in ("default", "researcher", "summarizer", "parser"):
-        mark = " (from models.txt)" if role in overrides else ""
-        print(f"  {role:<11} {models[role]}{mark}")
+    # Deliberately outside the branch above: an already-patched tree still has to
+    # prove its models answer, otherwise --check silently passes on a rerun.
+    if "--check" in sys.argv:
+        print("checking every model answers before the bot burns a run on them")
+        failures = check_models(models)
+        if failures:
+            print(f"unusable model(s): {', '.join(failures)}", file=sys.stderr)
+            return 1
     return 0
 
 
