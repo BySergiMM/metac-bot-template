@@ -40,15 +40,17 @@ MAX_TOKENS = 10
 # Every model name below was verified to exist in litellm 1.80.10's registry
 # (model_prices_and_context_window_backup.json) before this file was written.
 #
-# `env_candidates` exists because the repository secret is named GROK_API_KEY,
+# `env_candidates` records which env vars each route accepts. litellm looks for:
 # which matches NEITHER env var litellm looks for:
 #   Groq -> GROQ_API_KEY   (get_llm_provider_logic.py:204)
-#   xAI  -> XAI_API_KEY    (llms/xai/chat/transformation.py:29)
-# We therefore pass the key explicitly rather than relying on env discovery.
+# The earlier GROK_API_KEY secret turned out not to be a Groq key (401 Invalid
+# API Key on /models and /chat/completions); it has been replaced by a real
+# GROQ_API_KEY. The key is still passed explicitly rather than relying on env
+# discovery, so a future rename cannot silently disable a route.
 ROUTES = [
     {
         "label": "Groq",
-        "env_candidates": ["GROK_API_KEY", "GROQ_API_KEY"],
+        "env_candidates": ["GROQ_API_KEY"],
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "auth_scheme": "Bearer",
         "http_model": "llama-3.1-8b-instant",
