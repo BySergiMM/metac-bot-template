@@ -291,6 +291,70 @@ def list_models(route: dict, timeout: int = 30) -> dict:
     return out
 
 
+# The parser role is wrapped in the same fallback chain as the reasoning roles,
+# and the parser is the one role whose output MUST be machine-readable:
+# structure_output() asks for a JSON schema and raises if two samples disagree.
+# A fallback that answers in prose would turn "provider outage survived" into
+# "prediction discarded", so structured output is verified per provider, not
+# assumed from a marketing page.
+STRUCTURED_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "prediction",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"probability": {"type": "number"}},
+            "required": ["probability"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def probe_structured(route: dict) -> dict:
+    """Can this provider return schema-constrained JSON, as the parser needs?"""
+    out = {"layer": "structured", "provider": route["label"],
+           "litellm_model": route["litellm_model"]}
+    key, _ = resolve_key(route)
+    if not key:
+        out.update({"result": "NOT_TESTED", "reason": "CREDENTIAL_REQUIRED"})
+        return out
+    try:
+        import litellm
+    except ImportError:
+        out.update({"result": "NOT_TESTED", "reason": "litellm not installed"})
+        return out
+    litellm.suppress_debug_info = True
+    litellm.drop_params = False  # we want to KNOW if the param is unsupported
+    kwargs = dict(route.get("litellm_extra") or {})
+    if kwargs.pop("extra_headers_from", None):
+        kwargs["extra_headers"] = {"Content-Type": "application/json",
+                                   "Authorization": "Token {0}".format(key)}
+    started = time.time()
+    try:
+        response = litellm.completion(
+            model=route["litellm_model"],
+            messages=[{"role": "user",
+                       "content": "Give the probability 0.42 as JSON."}],
+            response_format=STRUCTURED_SCHEMA,
+            max_tokens=40, temperature=0, api_key=key, timeout=45, **kwargs,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(text)
+        out.update({"result": "OK", "latency_s": round(time.time() - started, 2),
+                    "parsed_keys": sorted(parsed), "raw": text[:80]})
+    except json.JSONDecodeError as exc:
+        out.update({"result": "FAIL", "error_class": "NOT_JSON", "error": str(exc)[:200]})
+    except Exception as exc:  # noqa: BLE001
+        out.update({"result": "FAIL",
+                    "error_class": classify(getattr(exc, "status_code", None), str(exc)),
+                    "error": str(exc)[:250].replace("\n", " ")})
+    finally:
+        litellm.drop_params = True
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--litellm", action="store_true")
@@ -316,6 +380,10 @@ def main() -> int:
             lite = probe_litellm(route)
             results.append(lite)
             print(json.dumps(lite, indent=2, sort_keys=True))
+            if lite.get("result") == "OK":
+                structured = probe_structured(route)
+                results.append(structured)
+                print(json.dumps(structured, indent=2, sort_keys=True))
         print("-" * 70)
 
     print("=" * 70)
