@@ -60,8 +60,8 @@ ROUTES = [
         "env_candidates": ["CEREBRAS_API_KEY"],
         "url": "https://api.cerebras.ai/v1/chat/completions",
         "auth_scheme": "Bearer",
-        "http_model": "llama3.1-8b",
-        "litellm_model": "cerebras/llama3.1-8b",
+        "http_model": "gpt-oss-120b",
+        "litellm_model": "cerebras/gpt-oss-120b",
         "litellm_extra": {},
     },
     {
