@@ -69,8 +69,8 @@ ROUTES = [
         "env_candidates": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "auth_scheme": "Bearer",
-        "http_model": "gemini-2.5-flash-lite",
-        "litellm_model": "gemini/gemini-2.5-flash-lite",
+        "http_model": "gemini-3.5-flash-lite",
+        "litellm_model": "gemini/gemini-3.5-flash-lite",
         "litellm_extra": {},
     },
     {
@@ -147,6 +147,8 @@ def probe_http(route: dict, timeout: int = 45) -> dict:
         headers={
             "Content-Type": "application/json",
             "Authorization": "{0} {1}".format(route["auth_scheme"], key),
+            "User-Agent": "smoke-test/1.0",
+            "Accept": "application/json",
         },
         method="POST",
     )
@@ -245,6 +247,48 @@ def probe_litellm(route: dict) -> dict:
     return out
 
 
+MODEL_LIST_URLS = {
+    "Groq": "https://api.groq.com/openai/v1/models",
+    "Cerebras": "https://api.cerebras.ai/v1/models",
+    "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai/models",
+    "Metaculus LLM proxy": "https://llm-proxy.metaculus.com/proxy/openai/v1/models",
+}
+
+
+def list_models(route: dict, timeout: int = 30) -> dict:
+    """Ask the provider what it serves. Beats guessing: the first run failed on
+    three routes purely because of model names, and one provider replied with
+    the exact replacement to use."""
+    url = MODEL_LIST_URLS.get(route["label"])
+    out = {"layer": "models", "provider": route["label"]}
+    key, _ = resolve_key(route)
+    if not url or not key:
+        out.update({"result": "NOT_TESTED"})
+        return out
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": "{0} {1}".format(route["auth_scheme"], key),
+                 "User-Agent": "smoke-test/1.0", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+        ids = sorted(m.get("id", "?") for m in (data.get("data") or []))
+        out.update({"result": "OK", "n_models": len(ids), "models": ids[:40]})
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            pass
+        out.update({"result": "FAIL", "http": exc.code,
+                    "error_class": classify(exc.code, body), "error": body[:200].replace("\n", " ")})
+    except Exception as exc:  # noqa: BLE001
+        out.update({"result": "FAIL", "error": str(exc)[:200]})
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--litellm", action="store_true")
@@ -260,6 +304,9 @@ def main() -> int:
 
     results = []
     for route in ROUTES:
+        catalogue = list_models(route)
+        results.append(catalogue)
+        print(json.dumps(catalogue, indent=2, sort_keys=True))
         http = probe_http(route)
         results.append(http)
         print(json.dumps(http, indent=2, sort_keys=True))
