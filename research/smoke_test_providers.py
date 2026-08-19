@@ -53,8 +53,8 @@ ROUTES = [
         "env_candidates": ["GROQ_API_KEY"],
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "auth_scheme": "Bearer",
-        "http_model": "llama-3.1-8b-instant",
-        "litellm_model": "groq/llama-3.1-8b-instant",
+        "http_model": "openai/gpt-oss-120b",
+        "litellm_model": "groq/openai/gpt-oss-120b",
         "litellm_extra": {},
     },
     {
