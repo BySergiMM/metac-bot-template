@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fetch = build a dataset and report; diagnose = probe API access only"
+        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers"
         required: false
         default: "fetch"
         type: choice
-        options: ["fetch", "diagnose"]
+        options: ["fetch", "diagnose", "smoke-test"]
       tournaments:
         description: "Tournaments forming the coverage denominator (space separated)"
         required: false
@@ -76,6 +76,23 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tests -t . -v
 
+      # One tiny completion per candidate provider, to find out which of the
+      # newly added secrets actually work. Deliberately excluded: OpenRouter
+      # (known good, and a test would burn one of the ~50 free calls/day the
+      # audit showed is the scarce resource) and xAI/Grok (no free tier).
+      # Installs litellm but NOT forecasting-tools, so the "the forecaster
+      # cannot run here" guarantee above still holds.
+      - name: Smoke test candidate LLM providers
+        if: ${{ github.event.inputs.mode == 'smoke-test' }}
+        env:
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: |
+          pip install --quiet "litellm==1.80.10"
+          python research/smoke_test_providers.py --litellm
+
       # Prints HTTP statuses and JSON key names only, never question content.
       # Exists because guessing which parameter the gateway rejects would cost
       # one push and one workflow run per guess.
@@ -91,7 +108,7 @@ jobs:
       # interpolated into the shell line: `${{ }}` inside `run:` is textual
       # substitution, so a crafted input would execute as script.
       - name: Fetch own track record (GET only, closed questions only)
-        if: ${{ github.event.inputs.mode != 'diagnose' }}
+        if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           TOURNAMENTS: ${{ github.event.inputs.tournaments || '33022 minibench' }}
@@ -103,14 +120,14 @@ jobs:
 
       # No METACULUS_TOKEN from here on: the remaining steps work on local files.
       - name: Analyse
-        if: ${{ github.event.inputs.mode != 'diagnose' }}
+        if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         run: |
           python research/analyze_track_record.py \
             --root "$RUNNER_TEMP/datasets" \
             --json "$RUNNER_TEMP/full_report.json"
 
       - name: Build the publishable summary
-        if: ${{ github.event.inputs.mode != 'diagnose' }}
+        if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         run: |
           python research/export_safe_report.py \
             --in "$RUNNER_TEMP/full_report.json" \
@@ -118,7 +135,7 @@ jobs:
             --out-text milestone2_report.txt
 
       - name: Refuse to publish raw data
-        if: ${{ github.event.inputs.mode != 'diagnose' }}
+        if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         run: |
           set -e
           for f in milestone2_summary.json milestone2_report.txt; do
@@ -142,7 +159,7 @@ jobs:
           echo "publication checks passed"
 
       - name: Upload aggregates-only summary
-        if: ${{ github.event.inputs.mode != 'diagnose' }}
+        if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: milestone2-track-record-summary
