@@ -40,8 +40,14 @@ jobs:
       # forecasting-tools assigns the researcher role to a model OpenRouter no
       # longer serves, which 404s every question. This activates the pinned llms
       # block in main.py so the run uses models that actually exist.
+      # The fallback chain activates only for keys present HERE: pin_models.py
+      # reads os.environ at patch time, so a secret that reaches the bot step
+      # but not this one produces a chain that silently stays empty.
       - name: Pin LLM models
         run: python backtest/pin_models.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       - name: Run bot
         run: |
           poetry run python main.py
@@ -56,3 +62,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # Fallback providers. Both verified by research/smoke_test_providers.py
+          # before being wired in; absent keys simply disable their leg.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

@@ -97,10 +97,33 @@ DEFAULTS = {
 # env var (GEMINI_API_KEY / GROQ_API_KEY) - present in the workflow only if
 # the corresponding secret is set. Absent keys are skipped, never an error:
 # fallback is an upgrade, not a requirement.
+# Every entry here was verified end-to-end by research/smoke_test_providers.py
+# (workflow run 32293364075): the provider's own /models catalogue was listed,
+# then a real completion returned 200 OK through BOTH raw HTTP and litellm.
+# Model names are NOT taken from litellm's price registry - that is a price
+# table, not an entitlement check, and three of three guesses taken from it
+# turned out to be unavailable to these accounts.
+#
+# Deliberately excluded, both verified as unusable at EUR 0:
+#   Cerebras  402 "Payment required to access this resource" - no free tier
+#   Metaculus 400 "You don't have an allowance for model <gpt-4o-mini>"
 FALLBACK_CHAIN = [
-    ("gemini/gemini-2.5-flash", "GEMINI_API_KEY"),
-    ("groq/llama-3.3-70b-versatile", "GROQ_API_KEY"),
+    ("gemini/gemini-3.5-flash-lite", "GEMINI_API_KEY"),
+    ("groq/openai/gpt-oss-120b", "GROQ_API_KEY"),
 ]
+
+# Which of those can serve the PARSER. The parser is the one role whose output
+# must be machine-readable: structure_output() requests a JSON schema and
+# raises when two samples disagree, so a backend that answers in prose turns a
+# survived outage into a discarded prediction.
+#
+# Measured, not assumed (same smoke-test run):
+#   gemini/gemini-3.5-flash-lite  returned {"probability": 0.42}          OK
+#   groq/openai/gpt-oss-120b      json_validate_failed, failed_generation="" 
+# So Groq stays in the reasoning chain, where prose is exactly what we want,
+# and is excluded from the parser chain. A reasoning role that falls all the
+# way to Groq still gets parsed by OpenRouter or Gemini.
+STRUCTURED_OUTPUT_CAPABLE = {"gemini/gemini-3.5-flash-lite"}
 
 # forecasting-tools only applies a custom timeout to roles given as GeneralLlm;
 # a bare model string silently gets its 60s default. The free tier queues past
@@ -139,13 +162,37 @@ ANCHOR = '''        # llms={
 REASONING_ROLES = ("default", "summarizer", "researcher", "parser")
 
 
-def _backend_expr(model: str) -> str:
+# A provider inside a fallback chain gets exactly ONE attempt. GeneralLlm.invoke
+# is wrapped by RetryableModel with wait_random_exponential(min=5, max=60), so
+# allowed_tries=3 on a chain member means up to ~2 minutes of backoff before the
+# next provider is even tried - and a daily-quota 429 cannot succeed on retry
+# anyway. Retrying is the fallback's job now, and it retries by switching
+# provider, not by asking the same exhausted account again.
+#
+# Standalone (no fallback keys present) keeps allowed_tries=3, so the
+# no-fallback path stays byte-for-byte identical to before this feature.
+TRIES_IN_CHAIN = 1
+TRIES_STANDALONE = 3
+
+
+def _backend_expr(model: str, allowed_tries: int = TRIES_STANDALONE) -> str:
     """One GeneralLlm(...) call, single line, for use inside a FallbackLlm list
     or standalone."""
     return (
         f'GeneralLlm(model="{model}", temperature=0.3, '
-        f"timeout={TIMEOUT_SECONDS}, allowed_tries=3)"
+        f"timeout={TIMEOUT_SECONDS}, allowed_tries={allowed_tries})"
     )
+
+
+def _fallbacks_for(role: str) -> list[str]:
+    """Active fallback models this role may actually use.
+
+    Every role gets the full chain except the parser, which only gets backends
+    verified to emit schema-constrained JSON."""
+    models = [model for model, _env in ACTIVE_FALLBACKS]
+    if role == "parser":
+        return [m for m in models if m in STRUCTURED_OUTPUT_CAPABLE]
+    return models
 
 
 def _role_expr(role: str, model: str) -> str:
@@ -153,10 +200,13 @@ def _role_expr(role: str, model: str) -> str:
     in FallbackLlm when at least one fallback API key is present; otherwise
     (or for the parser) a single GeneralLlm, unchanged from before fallback
     existed."""
-    if role not in REASONING_ROLES or not ACTIVE_FALLBACKS:
+    if role not in REASONING_ROLES:
         return _backend_expr(model)
-    backends = [_backend_expr(model)] + [
-        _backend_expr(fb_model) for fb_model, _env in ACTIVE_FALLBACKS
+    fallbacks = _fallbacks_for(role)
+    if not fallbacks:
+        return _backend_expr(model)
+    backends = [_backend_expr(model, TRIES_IN_CHAIN)] + [
+        _backend_expr(fb_model, TRIES_IN_CHAIN) for fb_model in fallbacks
     ]
     joined = ",\n                ".join(backends)
     return f"FallbackLlm([\n                {joined},\n            ])"
@@ -304,9 +354,25 @@ def _eval_llms_dict(generated: str, active_fallbacks: list) -> dict:
     assert isinstance(result, dict), f"llms= evaluated to {type(result)}, not dict"
     assert set(result) == {"default", "summarizer", "researcher", "parser"}
     for role in ("default", "summarizer", "researcher", "parser"):
-        if active_fallbacks:
+        # Chain length is per-role now: the parser only accepts backends
+        # verified to emit schema-constrained JSON, so it can legitimately be
+        # shorter than the reasoning chain (or absent entirely, if the only
+        # active fallback cannot parse).
+        expected_fallbacks = _fallbacks_for(role) if active_fallbacks else []
+        if expected_fallbacks:
             assert isinstance(result[role], _StubFallbackLlm), f"{role} should be wrapped"
-            assert len(result[role].backends) == 1 + len(active_fallbacks)
+            assert len(result[role].backends) == 1 + len(expected_fallbacks), (
+                f"{role}: expected {1 + len(expected_fallbacks)} backends, "
+                f"got {len(result[role].backends)}"
+            )
+            served = [b.model for b in result[role].backends[1:]]
+            assert served == expected_fallbacks, f"{role} chain is {served}"
+        elif active_fallbacks and role == "parser":
+            # Fallbacks exist but none can parse: the parser stays unwrapped
+            # rather than gaining a backend that would answer in prose.
+            assert isinstance(result[role], _StubGeneralLlm), (
+                "parser should stay a single backend when no fallback can parse"
+            )
         elif role == "parser":
             assert isinstance(result[role], str), "parser should stay a bare model string"
         else:
@@ -366,10 +432,11 @@ def selftest() -> None:
     # cap with the reasoning roles.
     saved_fallbacks = ACTIVE_FALLBACKS
     try:
-        ACTIVE_FALLBACKS = [
-            ("gemini/gemini-2.5-flash", "GEMINI_API_KEY"),
-            ("groq/llama-3.3-70b-versatile", "GROQ_API_KEY"),
-        ]
+        # Exercise the real configured chain rather than a hardcoded copy, so
+        # this check cannot drift away from FALLBACK_CHAIN.
+        ACTIVE_FALLBACKS = list(FALLBACK_CHAIN)
+        parser_fallbacks = _fallbacks_for("parser")
+        reasoning_fallbacks = _fallbacks_for("default")
         with_fb = patch(stub, DEFAULTS)
         assert IMPORT_LINE in with_fb
         # default/researcher/summarizer share one model string in DEFAULTS
@@ -377,10 +444,17 @@ def selftest() -> None:
         # distinct model string, so it is not part of this count.
         assert with_fb.count(DEFAULTS["default"]) == 3
         assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["default"] in with_fb
-        assert with_fb.count("gemini/gemini-2.5-flash") == 4  # default+researcher+summarizer+parser
-        assert with_fb.count("groq/llama-3.3-70b-versatile") == 4
-        assert with_fb.count("FallbackLlm([") == 4
-        assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["parser"] in with_fb
+        # Reasoning roles get every active fallback; the parser gets only the
+        # structured-output-capable subset, so counts differ by design.
+        for model in reasoning_fallbacks:
+            expected = 3 + (1 if model in parser_fallbacks else 0)
+            assert with_fb.count(model) == expected, (
+                f"{model}: expected {expected} occurrences, got {with_fb.count(model)}"
+            )
+        wrapped_roles = 3 + (1 if parser_fallbacks else 0)
+        assert with_fb.count("FallbackLlm([") == wrapped_roles
+        if parser_fallbacks:
+            assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["parser"] in with_fb
         ast.parse(with_fb)
         _eval_llms_dict(with_fb, ACTIVE_FALLBACKS)  # real dict, correct backend count per role
         assert patch(with_fb, DEFAULTS) == with_fb  # idempotent with fallback active too
@@ -441,7 +515,7 @@ def check_models(models: dict[str, str]) -> list[str]:
         # reasoning roles (see REASONING_ROLES / docstring). With no fallback
         # keys present, fallback_models is empty and this degrades to "dead
         # primary = dead role", the pre-fallback behavior.
-        chain = [models[role]] + (fallback_models if role in REASONING_ROLES else [])
+        chain = [models[role]] + (_fallbacks_for(role) if role in REASONING_ROLES else [])
         if all(results[m] is not None for m in chain):
             dead_roles.append(role)
     return dead_roles
