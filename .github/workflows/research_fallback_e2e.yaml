@@ -1,0 +1,117 @@
+name: Research - Fallback E2E (bot-testing-area only)
+
+# ONE-OFF EXPERIMENT. Not production, not scheduled, not repeatable by accident.
+#
+# Question it exists to answer:
+#   With OpenRouter unavailable, can Gemini/Groq carry the REAL forecasting
+#   pipeline - research, summarisation, reasoning, parser, publication - while
+#   the prediction metric stays exactly what it was?
+#
+# How OpenRouter is forced to fail:
+#   By omission. OPENROUTER_API_KEY is simply not in any env below, so litellm
+#   raises an auth error before issuing a billable request. That costs zero
+#   OpenRouter quota - which matters, because the throughput audit showed the
+#   ~50 free calls/day are the scarce resource. No fake provider, no
+#   monkeypatch, no edit to pin_models.py or fallback_llm.py: the chain under
+#   test is exactly the code on main.
+#
+# Target: bot-testing-area (project 32977), which Metaculus documents as an
+# unscored practice area. main.py --mode test_questions hard-codes that slug
+# (main.py:736) and never touches CURRENT_AI_COMPETITION_ID or
+# CURRENT_MINIBENCH_ID, so there is no path from here to the tournament.
+#
+# Known in advance, and NOT to be read as failures:
+#   - test_questions sets skip_previously_forecasted_questions = False
+#     (main.py:733), so duplicate protection is N/A here by design.
+#   - Groq is excluded from the parser chain (it returned json_validate_failed
+#     on a schema request), so if Gemini holds, the parser may never exercise
+#     its third link at all.
+
+on:
+  workflow_dispatch:
+
+# No `schedule:` key anywhere in this file, on purpose: this experiment must be
+# impossible to trigger by cron.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  fallback_e2e:
+    name: Real pipeline with OpenRouter absent
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      # Presence only. Values are never echoed.
+      - name: Confirm credential shape
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: |
+          present() { if [ -n "$1" ]; then echo yes; else echo no; fi; }
+          echo "GEMINI_API_KEY present:     $(present "$GEMINI_API_KEY")"
+          echo "GROQ_API_KEY present:       $(present "$GROQ_API_KEY")"
+          echo "METACULUS_TOKEN present:    $(present "$METACULUS_TOKEN")"
+          echo "OPENROUTER_API_KEY present: $(present "$OPENROUTER_API_KEY")"
+          if [ -n "$OPENROUTER_API_KEY" ]; then
+            echo "::error::OPENROUTER_API_KEY is set; this experiment must not consume it"
+            exit 1
+          fi
+
+      # Guard the destination before anything runs, so a future edit to main.py
+      # cannot silently point this experiment at the tournament.
+      - name: Confirm the target is bot-testing-area, not the tournament
+        run: |
+          set -e
+          grep -q '"bot-testing-area", return_exceptions=True' main.py \
+            || { echo "::error::test_questions no longer targets bot-testing-area"; exit 1; }
+          echo "target confirmed: bot-testing-area (32977)"
+          echo "--- the tournament branches this run will NOT take ---"
+          grep -n "CURRENT_AI_COMPETITION_ID\|CURRENT_MINIBENCH_ID" main.py
+
+      # Same command test_bot uses. With no OpenRouter key its ping fails, but
+      # check_models only calls a role dead when its WHOLE chain fails, so a
+      # live Gemini keeps the role alive. This step is therefore the first real
+      # exercise of the fallback logic.
+      - name: Pin and verify LLM models (OpenRouter absent)
+        run: poetry run python backtest/pin_models.py --check
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+      # Record exactly which chain was generated, so the run's own evidence
+      # states what was under test rather than relying on the audit's word.
+      - name: Show the generated llms block
+        run: sed -n '/^        llms={$/,/^        },$/p' main.py
+
+      # Unmodified command. No extra flags, no altered arguments.
+      - name: Run the real pipeline against bot-testing-area
+        run: |
+          poetry run python main.py --mode test_questions
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
