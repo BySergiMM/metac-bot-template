@@ -18,19 +18,29 @@ Only __init__ and invoke() are overridden. Everything else (cost tracking,
 retry decorator, token limits) is inherited from GeneralLlm and applies to
 whichever backend actually served the request.
 
+Rate limiting
+-------------
+Every backend call goes through a process-wide limiter for that model first.
+The E2E run proved this is not optional: without it the bot fired ~185 calls in
+18 seconds against a Gemini quota of 15 per MINUTE and produced zero forecasts.
+
+The limiter is fetched from a registry keyed by model, never stored per
+instance, because get_llm() hands out one object per ROLE - four of them, each
+with its own GeneralLlm for the same Gemini model. Per-instance limiters would
+silently permit four times the quota.
+
 What this deliberately does NOT do
 ----------------------------------
-It changes availability and nothing else. One call in gives one string out, of
-the same type, whichever provider produced it. It does not know what a
-forecast is, cannot retry a forecast, and cannot make one question look like
-two. The number of predictions, the success threshold, the aggregation and the
-POST are all decided upstream and are untouched.
+It changes availability and pacing, nothing else. One call in gives one string
+out, of the same type, whichever provider produced it and however long it
+waited. It does not know what a forecast is, cannot retry a forecast, and
+cannot make one question look like two. The number of predictions, the success
+threshold, the aggregation and the POST are all decided upstream and are
+untouched. A call delayed by the limiter is still exactly one call.
 
-Metrics discipline: a provider attempt is INFRASTRUCTURE, not a prediction.
-Switching provider mid-question is one prediction served by the second
-provider, never two predictions. This class emits structured logs so provider
-behaviour can be measured separately, and increments no forecast counter -
-there is none here to increment.
+Metrics discipline: provider attempts and rate-limit waits are INFRASTRUCTURE.
+They live in rate_limiter.COUNTERS and are never read by the forecast metric,
+which is derived from Metaculus' own my_forecasts records.
 """
 
 from __future__ import annotations
@@ -39,6 +49,8 @@ import logging
 import time
 
 from forecasting_tools.ai_models.general_llm import GeneralLlm
+
+from backtest.rate_limiter import COUNTERS, RateLimitTimeout, get_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -69,32 +81,47 @@ class FallbackLlm(GeneralLlm):
         """
         errors = []
         for depth, backend in enumerate(self._backends):
-            started = time.monotonic()
-            # INFRASTRUCTURE metric. Deliberately not a forecast counter.
+            limiter = get_limiter(backend.model)
+
+            # Pace before calling. A wait here is not a failure and not a
+            # retry: it is the same single call, starting later.
+            try:
+                waited = await limiter.acquire()
+            except RateLimitTimeout as exc:
+                errors.append(f"{backend.model}: {exc}")
+                logger.warning(
+                    "llm_ratelimit_giveup provider_index=%d provider=%s reason=%s",
+                    depth, backend.model, exc,
+                )
+                continue
+
+            COUNTERS.llm_attempts_total += 1
             logger.info(
-                "llm_attempt provider_index=%d model=%s", depth, backend.model
+                "llm_attempt provider_index=%d provider=%s wait_ms=%d",
+                depth, backend.model, int(waited * 1000),
             )
+
+            started = time.monotonic()
             try:
                 result = await backend.invoke(prompt, system_prompt)
             except Exception as exc:  # noqa: BLE001 - must try the next backend regardless of cause
                 elapsed = time.monotonic() - started
                 errors.append(f"{backend.model}: {exc}")
                 logger.warning(
-                    "llm_failure provider_index=%d model=%s latency_s=%.2f error=%r",
-                    depth, backend.model, elapsed, exc,
+                    "llm_failure provider_index=%d provider=%s latency_s=%.2f reason=%r",
+                    depth, backend.model, elapsed, _reason(exc),
                 )
                 continue
 
             elapsed = time.monotonic() - started
-            logger.info(
-                "llm_success provider_index=%d model=%s latency_s=%.2f fallback_used=%s",
-                depth, backend.model, elapsed, depth > 0,
-            )
+            COUNTERS.llm_success_total += 1
             if depth > 0:
-                logger.warning(
-                    "Primary backend(s) failed, served by fallback #%d: %s",
-                    depth, backend.model,
-                )
+                COUNTERS.llm_fallback_total += 1
+            logger.info(
+                "llm_success provider_index=%d provider=%s latency_s=%.2f "
+                "wait_ms=%d fallback_used=%s",
+                depth, backend.model, elapsed, int(waited * 1000), depth > 0,
+            )
             # NOTE: self.model is deliberately NOT reassigned to the serving
             # backend. forecast_questions runs every question concurrently
             # through one shared llm object, so mutating instance state here is
@@ -104,7 +131,19 @@ class FallbackLlm(GeneralLlm):
             return result
 
         logger.error(
-            "llm_exhausted backends=%d - question will have no prediction from this call",
+            "llm_exhausted backends=%d - this call produced no text; the "
+            "prediction it belonged to will not exist",
             len(self._backends),
         )
         raise RuntimeError("All backends failed:\n" + "\n".join(errors))
+
+
+def _reason(exc: Exception) -> str:
+    """A short, log-safe label. Never the full response body: prompts and model
+    output can be long and are not ours to spray into CI logs."""
+    name = type(exc).__name__
+    text = str(exc)
+    for marker in ("RESOURCE_EXHAUSTED", "rate_limit", "RateLimit", "429"):
+        if marker in text:
+            return name + ":rate_limited"
+    return name + ":" + text[:80].replace("\n", " ")

@@ -81,7 +81,15 @@ class ScriptedBackend(GeneralLlm):
 
 
 def run(coro):
-    return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(coro)
+    """Run one coroutine on a fresh loop and close it.
+
+    Closing matters: leaked loops emit ResourceWarnings that bury real output.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def chain(*backends) -> FallbackLlm:
