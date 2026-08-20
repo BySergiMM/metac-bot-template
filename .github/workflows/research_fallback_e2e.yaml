@@ -152,8 +152,20 @@ jobs:
           import io, os, sys
 
           src = io.open("main.py", encoding="utf-8").read()
-          start = src.find("        llms={")
+          # main.py's module docstring carries an UNcommented llms={...}
+          # example at the same indentation, before the real bot. A plain
+          # search finds that first and would validate the documentation
+          # instead of the generated block -- the trap pin_models._llms_block_span
+          # documents, and which this guard fell into on run 32385758835.
+          init_at = src.find("template_bot = SummerTemplateBot2026(")
+          if init_at == -1:
+              print("::error::bot instantiation not found in main.py")
+              sys.exit(1)
+          start = src.find("        llms={", init_at)
           block = src[start:src.find("        },", start)]
+          if start == -1 or not block:
+              print("::error::no generated llms block found after the bot init")
+              sys.exit(1)
 
           # 1. every present credential must have produced its own bucket
           missing = [n for n in ("GEMINI_API_KEY", "GEMINI2_API_KEY",
@@ -169,7 +181,11 @@ jobs:
           for name in ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
                        "GEMINI4_API_KEY", "GROQ_API_KEY"):
               value = (os.environ.get(name) or "").strip()
-              if value and value in src:
+              # Only substantial values are searched for. A one- or two-character
+              # placeholder occurs naturally in any source file, so scanning for
+              # it would report a leak that is not one. Real provider keys are
+              # far longer than this floor.
+              if len(value) >= 12 and value in src:
                   print("::error::{0}'s VALUE appears in main.py".format(name))
                   sys.exit(1)
           if "limiter_key=" in block:
