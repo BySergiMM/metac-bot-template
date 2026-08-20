@@ -558,7 +558,7 @@ def selftest() -> None:
     ACTIVE_FALLBACKS reflects whatever keys are actually set when this module was
     imported, so every check below reads that real value rather than hardcoding [].
     """
-    global ACTIVE_FALLBACKS
+    global ACTIVE_FALLBACKS, ACTIVE_GEMINI_BUCKETS, BALANCED
     stub = IMPORT_ANCHOR + "\n" + BOT_INIT_ANCHOR + "        a=1,\n" + ANCHOR + "    )\n"
     once = patch(stub, DEFAULTS)
     assert "# llms={" not in once, "comment markers survived the patch"
@@ -590,7 +590,16 @@ def selftest() -> None:
     # The docstring's own example model (gpt-4o) must survive untouched,
     # and the real block below it must be the one that got patched.
     assert 'model="openrouter/openai/gpt-4o"' in trapped  # docstring example untouched
-    assert trapped.count(DEFAULTS["default"]) == 3  # real block: 3 reasoning roles patched
+    # Three reasoning roles are patched. When balancing is active each role
+    # emits one chain per credential, and every chain opens with the same
+    # OpenRouter backend, so the model string appears once per chain per role.
+    # The parser is excluded from this count: it uses a different default.
+    chains_per_role = len(ACTIVE_GEMINI_BUCKETS) if BALANCED else 1
+    assert trapped.count(DEFAULTS["default"]) == 3 * chains_per_role, (
+        "expected {0} occurrences ({1} reasoning roles x {2} chain(s)), got {3}".format(
+            3 * chains_per_role, 3, chains_per_role,
+            trapped.count(DEFAULTS["default"]))
+    )
     real_block_start = trapped.index(BOT_INIT_ANCHOR)
     assert 'model="openrouter/openai/gpt-4o"' not in trapped[real_block_start:], (
         "the real block still has the old example model - docstring text leaked into the match"
@@ -602,10 +611,18 @@ def selftest() -> None:
     # gets every backend, since parser shares OpenRouter's account-wide daily
     # cap with the reasoning roles.
     saved_fallbacks = ACTIVE_FALLBACKS
+    saved_buckets = ACTIVE_GEMINI_BUCKETS
+    saved_balanced = BALANCED
     try:
         # Exercise the real configured chain rather than a hardcoded copy, so
         # this check cannot drift away from FALLBACK_CHAIN.
         ACTIVE_FALLBACKS = list(FALLBACK_CHAIN)
+        # Pin the bucket count too. Without this the counts below silently
+        # depend on how many GEMINI*_API_KEY happen to be set in the calling
+        # environment, which is what broke CI run 32385415823: the block was
+        # written for one chain per role and a second credential makes it two.
+        ACTIVE_GEMINI_BUCKETS = [(GEMINI_BUCKET_ENV_VARS[0], GEMINI_BUCKET_KEYS[0])]
+        BALANCED = False
         parser_fallbacks = _fallbacks_for("parser")
         reasoning_fallbacks = _fallbacks_for("default")
         with_fb = patch(stub, DEFAULTS)
@@ -630,12 +647,36 @@ def selftest() -> None:
         _eval_llms_dict(with_fb, ACTIVE_FALLBACKS)  # real dict, correct backend count per role
         assert patch(with_fb, DEFAULTS) == with_fb  # idempotent with fallback active too
 
+        # Balanced wiring: the same roles, one chain per credential. Counts
+        # scale by the number of buckets, and the balanced import must appear.
+        ACTIVE_GEMINI_BUCKETS = [
+            (env, key) for env, key
+            in zip(GEMINI_BUCKET_ENV_VARS, GEMINI_BUCKET_KEYS)
+        ]
+        BALANCED = True
+        balanced_src = patch(stub, DEFAULTS)
+        buckets = len(ACTIVE_GEMINI_BUCKETS)
+        assert BALANCED_IMPORT_LINE in balanced_src
+        assert balanced_src.count(DEFAULTS["default"]) == 3 * buckets
+        assert balanced_src.count("BalancedLlm([") == 3 + (1 if parser_fallbacks else 0)
+        # Every bucket must be named exactly once per role that uses it.
+        for _env, key in ACTIVE_GEMINI_BUCKETS:
+            occurrences = balanced_src.count('"{0}"'.format(key))
+            assert occurrences > 0, "bucket {0} never appears".format(key)
+        ast.parse(balanced_src)
+        _eval_llms_dict(balanced_src, ACTIVE_FALLBACKS)
+        assert patch(balanced_src, DEFAULTS) == balanced_src  # idempotent
+        ACTIVE_GEMINI_BUCKETS = [(GEMINI_BUCKET_ENV_VARS[0], GEMINI_BUCKET_KEYS[0])]
+        BALANCED = False
+
         # Import must disappear again if the chain goes back to empty (keys removed).
         ACTIVE_FALLBACKS = []
         reverted = patch(with_fb, DEFAULTS)
         assert IMPORT_LINE not in reverted
     finally:
         ACTIVE_FALLBACKS = saved_fallbacks
+        ACTIVE_GEMINI_BUCKETS = saved_buckets
+        BALANCED = saved_balanced
 
     tmp = pathlib.Path("/tmp/_pin_models_selftest.txt")
     tmp.write_text("parser: x/y  # trailing comment\n\n# whole-line comment\n")

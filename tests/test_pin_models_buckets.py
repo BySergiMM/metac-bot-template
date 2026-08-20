@@ -140,6 +140,44 @@ class ImportWiringTests(unittest.TestCase):
         self.assertNotIn("from backtest.balanced_llm import", reverted)
 
 
+class SelftestAcrossBucketCountsTests(unittest.TestCase):
+    """pin_models runs its own selftest on every invocation, before touching
+    main.py. Balancing multiplies how many times a model string appears in the
+    generated block -- once per chain per role -- and an assertion written for
+    the single-chain shape fails only when a second credential appears. That is
+    exactly how it escaped local checks and broke in CI (run 32385415823), so
+    every bucket count is exercised here.
+
+    selftest() operates on synthetic sources; it never writes main.py.
+    """
+
+    def _run_selftest(self, **env):
+        pm = load(**env)
+        pm.selftest()  # raises AssertionError on failure
+
+    def test_no_credentials(self):
+        self._run_selftest()
+
+    def test_one_credential(self):
+        self._run_selftest(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+
+    def test_two_credentials(self):
+        self._run_selftest(GEMINI_API_KEY="a", GEMINI2_API_KEY="b",
+                           GROQ_API_KEY="g")
+
+    def test_three_credentials(self):
+        self._run_selftest(GEMINI_API_KEY="a", GEMINI2_API_KEY="b",
+                           GEMINI3_API_KEY="c", GROQ_API_KEY="g")
+
+    def test_four_credentials(self):
+        self._run_selftest(GEMINI_API_KEY="a", GEMINI2_API_KEY="b",
+                           GEMINI3_API_KEY="c", GEMINI4_API_KEY="d",
+                           GROQ_API_KEY="g")
+
+    def test_groq_only(self):
+        self._run_selftest(GROQ_API_KEY="g")
+
+
 class DriftTests(unittest.TestCase):
     """pin_models duplicates the bucket keys because it runs as a bare script
     and cannot import backtest.*. That duplication must never drift."""
