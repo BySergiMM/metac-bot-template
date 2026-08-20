@@ -36,6 +36,11 @@ if "forecasting_tools" not in sys.modules:
             self.model = model
             self.allowed_tries = allowed_tries
             self.litellm_kwargs = {"temperature": temperature, "timeout": timeout}
+            # The real GeneralLlm keeps unknown kwargs in litellm_kwargs and
+            # forwards them to acompletion (general_llm.py:186). Dropping them
+            # here would make whichever test module imports first decide
+            # whether api_key survives -- an order-dependent suite.
+            self.litellm_kwargs.update(kwargs)
 
         async def invoke(self, prompt, system_prompt=None):  # pragma: no cover
             raise NotImplementedError

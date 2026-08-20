@@ -81,7 +81,15 @@ class FallbackLlm(GeneralLlm):
         """
         errors = []
         for depth, backend in enumerate(self._backends):
-            limiter = get_limiter(backend.model)
+            # Identity for rate limiting is `limiter_key` when the backend
+            # carries one, else the model string exactly as before. litellm
+            # requires every Gemini bucket to keep the same model string, so
+            # the model cannot separate two credentials; without this hook the
+            # four buckets would silently contend for one 15 RPM allowance.
+            # A backend with no limiter_key is indistinguishable from the
+            # pre-bucket behaviour, which is what keeps the single-key path
+            # byte-identical.
+            limiter = get_limiter(getattr(backend, "limiter_key", backend.model))
 
             # Pace before calling. A wait here is not a failure and not a
             # retry: it is the same single call, starting later.

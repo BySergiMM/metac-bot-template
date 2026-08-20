@@ -76,6 +76,32 @@ class ProviderLimits:
     max_wait_seconds: float = 300.0
 
 
+GEMINI_MODEL = "gemini/gemini-3.5-flash-lite"
+
+# One quota bucket per Gemini CREDENTIAL.
+#
+# Gemini meters PerProjectPerModel, not per key: quotaId
+# "GenerateRequestsPerMinutePerProjectPerModel-FreeTier", quotaValue "15",
+# quotaDimensions {"location": "global", "model": "gemini-3.5-flash-lite"} --
+# read off 344 real 429 payloads in run 32295883751. An API key is therefore
+# not a quota dimension, and two keys minted by one project share one bucket.
+#
+# That the four credentials really are four independent buckets was not
+# assumed. It was measured by interference in runs 32380381980 and
+# 32381181256: saturate one key, then ask another for a completion inside the
+# same 60s window. All six pairs came back independent, and each key's own
+# first 429 quoted quotaValue "15" (refused at attempts 16, 14, 22 and 16).
+#
+# The limiter registry is keyed by STRING, and litellm requires every bucket to
+# carry the same model string, so the identity that separates them cannot be
+# the model. It is `limiter_key`, and these are the only legal values.
+GEMINI_BUCKET_KEYS: tuple[str, ...] = (
+    GEMINI_MODEL,              # bucket 0 is the bare model: with one key the
+    GEMINI_MODEL + "#b1",      # registry looks exactly as it did before
+    GEMINI_MODEL + "#b2",      # buckets existed
+    GEMINI_MODEL + "#b3",
+)
+
 # Keyed by the model string as it appears in the llms= block, which is exactly
 # the granularity Gemini meters on.
 DEFAULT_LIMITS: dict[str, ProviderLimits] = {
@@ -94,6 +120,19 @@ DEFAULT_LIMITS: dict[str, ProviderLimits] = {
     "openrouter/nvidia/nemotron-3.5-lightning:free": ProviderLimits(),
     "openrouter/openai/gpt-4o-mini": ProviderLimits(),
 }
+
+# Buckets 1..3 carry the SAME measured quota as bucket 0. Registering them here
+# rather than letting limits_for() fall through is the whole safety property:
+# `DEFAULT_LIMITS.get(model, ProviderLimits())` returns an UNTHROTTLED limiter
+# for an unknown key, so a bucket added without an entry here would look
+# controlled and rate-limit nothing. test_rate_limiter asserts this cannot
+# happen for any key in GEMINI_BUCKET_KEYS.
+for _bucket in GEMINI_BUCKET_KEYS:
+    DEFAULT_LIMITS.setdefault(
+        _bucket,
+        ProviderLimits(requests_per_minute=15.0, tokens_per_minute=None),
+    )
+del _bucket
 
 _ENV_PREFIX = "LLM_RATE_"
 
