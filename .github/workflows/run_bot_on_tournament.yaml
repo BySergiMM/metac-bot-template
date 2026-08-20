@@ -56,6 +56,14 @@ jobs:
         run: python backtest/pin_models.py
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # One Gemini quota bucket per credential. These must be present HERE,
+          # not only on the bot step: pin_models reads os.environ at PATCH time
+          # to decide how many chains to generate, so a key that reaches only
+          # the bot produces a block with fewer buckets than credentials and
+          # the extra quota is silently never used.
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       - name: Run bot
         run: |
@@ -74,4 +82,14 @@ jobs:
           # Fallback providers. Both verified by research/smoke_test_providers.py
           # before being wired in; absent keys simply disable their leg.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # bucket_backend reads these by NAME at bot runtime, so the values are
+          # needed here as well as on the pin step above. Proven independent
+          # quota buckets (15 RPM each) by interference in runs 32380381980 and
+          # 32381181256, and exercised end to end on bot-testing-area in run
+          # 32385978761: 154 calls spread 41/36/41/36, zero 429s, zero
+          # RateLimitTimeouts, 3.03x faster than the same run on one bucket.
+          # An absent key simply means one bucket fewer.
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
