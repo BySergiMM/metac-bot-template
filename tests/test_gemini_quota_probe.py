@@ -141,6 +141,33 @@ class SafetyTests(unittest.TestCase):
         prevent; the probe must not reintroduce one."""
         self.assertLessEqual(probe.SATURATION_ATTEMPTS, 25)
 
+    def test_the_configurable_cap_still_has_a_ceiling(self):
+        """A cap that any invocation can raise without limit is not a cap."""
+        self.assertLessEqual(probe.MAX_ATTEMPTS_CEILING, 100)
+        self.assertGreater(probe.MAX_ATTEMPTS_CEILING, probe.SATURATION_ATTEMPTS)
+
+    def test_max_attempts_above_the_ceiling_is_refused(self):
+        import sys
+
+        saved = sys.argv
+        sys.argv = ["p", "--max-attempts", str(probe.MAX_ATTEMPTS_CEILING + 1)]
+        try:
+            with self.assertRaises(SystemExit):
+                probe.main()
+        finally:
+            sys.argv = saved
+
+    def test_an_unknown_key_name_is_refused(self):
+        import sys
+
+        saved = sys.argv
+        sys.argv = ["p", "--keys", "NOT_A_REAL_KEY"]
+        try:
+            with self.assertRaises(SystemExit):
+                probe.main()
+        finally:
+            sys.argv = saved
+
     def test_the_probe_never_imports_the_forecaster(self):
         source = open(probe.__file__, encoding="utf-8").read()
         self.assertNotIn("forecasting_tools", source)
@@ -149,6 +176,48 @@ class SafetyTests(unittest.TestCase):
     def test_calls_request_a_single_token(self):
         source = open(probe.__file__, encoding="utf-8").read()
         self.assertIn('"max_tokens": 1', source)
+
+
+class RoundAccountingTests(unittest.TestCase):
+    """A round must report what it actually cost, so a 'no refusal' result can
+    be read as a lower bound instead of being mistaken for a measured quota."""
+
+    def test_a_no_refusal_round_is_marked_and_never_yields_a_quota(self):
+        calls = {"n": 0}
+
+        def always_ok(key, timeout=30):
+            calls["n"] += 1
+            return {"ok": True, "http": 200, "latency_s": 0.0}
+
+        original, probe.call = probe.call, always_ok
+        try:
+            facts = probe.saturate({"_key": "x"}, [], max_attempts=7)
+        finally:
+            probe.call = original
+
+        self.assertTrue(facts["_no_refusal"])
+        self.assertEqual(facts["_attempts_made"], 7)
+        self.assertEqual(calls["n"], 7, "must respect the cap exactly")
+        self.assertNotIn("quotaValue", facts)
+
+    def test_the_exact_attempt_of_the_first_429_is_recorded(self):
+        state = {"n": 0}
+
+        def fail_after_three(key, timeout=30):
+            state["n"] += 1
+            if state["n"] <= 3:
+                return {"ok": True, "http": 200, "latency_s": 0.0}
+            return {"ok": False, "http": 429, "latency_s": 0.0, "body": REAL_429}
+
+        original, probe.call = probe.call, fail_after_three
+        try:
+            facts = probe.saturate({"_key": "x"}, [], max_attempts=60)
+        finally:
+            probe.call = original
+
+        self.assertEqual(facts["_attempt"], 4)
+        self.assertEqual(facts["quotaValue"], "15")
+        self.assertIn("_elapsed_s", facts)
 
 
 if __name__ == "__main__":

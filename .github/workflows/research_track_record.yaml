@@ -120,7 +120,18 @@ jobs:
           GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
           GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
           GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
-        run: python research/probe_gemini_quota_buckets.py --interference
+        run: |
+          # Round A: saturate key 3, probe key 4. Round B reverses the pair, so
+          # 3<->4 is demonstrated in both directions rather than one. Run
+          # 32380381980 left exactly this pair unresolved: key 3 survived 22
+          # attempts, so the cap is raised to 60 here. A key that still refuses
+          # nothing is reported as ">60 RPM", never as an assumed number.
+          python research/probe_gemini_quota_buckets.py --interference \
+            --max-attempts 60 --keys GEMINI3_API_KEY,GEMINI4_API_KEY
+          echo "--- reverse direction ---"
+          sleep 65   # let the 60s window drain so round B starts clean
+          python research/probe_gemini_quota_buckets.py --interference \
+            --max-attempts 60 --keys GEMINI4_API_KEY,GEMINI3_API_KEY
 
       # Prints HTTP statuses and JSON key names only, never question content.
       # Exists because guessing which parameter the gateway rejects would cost
