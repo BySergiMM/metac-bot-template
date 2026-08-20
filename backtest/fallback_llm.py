@@ -89,7 +89,8 @@ class FallbackLlm(GeneralLlm):
             # A backend with no limiter_key is indistinguishable from the
             # pre-bucket behaviour, which is what keeps the single-key path
             # byte-identical.
-            limiter = get_limiter(getattr(backend, "limiter_key", backend.model))
+            bucket = getattr(backend, "limiter_key", backend.model)
+            limiter = get_limiter(bucket)
 
             # Pace before calling. A wait here is not a failure and not a
             # retry: it is the same single call, starting later.
@@ -98,15 +99,21 @@ class FallbackLlm(GeneralLlm):
             except RateLimitTimeout as exc:
                 errors.append(f"{backend.model}: {exc}")
                 logger.warning(
-                    "llm_ratelimit_giveup provider_index=%d provider=%s reason=%s",
-                    depth, backend.model, exc,
+                    "llm_ratelimit_giveup provider_index=%d provider=%s bucket=%s "
+                    "reason=%s",
+                    depth, backend.model, bucket, exc,
                 )
                 continue
 
             COUNTERS.llm_attempts_total += 1
+            # `bucket` is logged as well as `provider`: with several
+            # credentials on one model every bucket reports the SAME provider
+            # string, so without this the per-bucket distribution is not
+            # observable at all. Purely additive - a bucket name is a limiter
+            # key, never a credential.
             logger.info(
-                "llm_attempt provider_index=%d provider=%s wait_ms=%d",
-                depth, backend.model, int(waited * 1000),
+                "llm_attempt provider_index=%d provider=%s bucket=%s wait_ms=%d",
+                depth, backend.model, bucket, int(waited * 1000),
             )
 
             started = time.monotonic()
@@ -116,8 +123,9 @@ class FallbackLlm(GeneralLlm):
                 elapsed = time.monotonic() - started
                 errors.append(f"{backend.model}: {exc}")
                 logger.warning(
-                    "llm_failure provider_index=%d provider=%s latency_s=%.2f reason=%r",
-                    depth, backend.model, elapsed, _reason(exc),
+                    "llm_failure provider_index=%d provider=%s bucket=%s "
+                    "latency_s=%.2f reason=%r",
+                    depth, backend.model, bucket, elapsed, _reason(exc),
                 )
                 continue
 
@@ -126,9 +134,9 @@ class FallbackLlm(GeneralLlm):
             if depth > 0:
                 COUNTERS.llm_fallback_total += 1
             logger.info(
-                "llm_success provider_index=%d provider=%s latency_s=%.2f "
+                "llm_success provider_index=%d provider=%s bucket=%s latency_s=%.2f "
                 "wait_ms=%d fallback_used=%s",
-                depth, backend.model, elapsed, int(waited * 1000), depth > 0,
+                depth, backend.model, bucket, elapsed, int(waited * 1000), depth > 0,
             )
             # NOTE: self.model is deliberately NOT reassigned to the serving
             # backend. forecast_questions runs every question concurrently

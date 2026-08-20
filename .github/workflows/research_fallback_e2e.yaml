@@ -64,15 +64,21 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      # Presence only. Values are never echoed.
-      - name: Confirm credential shape
+      # Presence and IDENTITY. Values are never echoed: each credential is
+      # reported as sha256(key)[:8], which is stable (so two secrets holding
+      # the same value are visibly identical) and non-reversible. Four equal
+      # ids would mean one key stored four times, which would silently make
+      # this a one-bucket run wearing a four-bucket costume.
+      - name: Confirm credential shape and distinctness
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
         run: |
           present() { if [ -n "$1" ]; then echo yes; else echo no; fi; }
-          echo "GEMINI_API_KEY present:     $(present "$GEMINI_API_KEY")"
           echo "GROQ_API_KEY present:       $(present "$GROQ_API_KEY")"
           echo "METACULUS_TOKEN present:    $(present "$METACULUS_TOKEN")"
           echo "OPENROUTER_API_KEY present: $(present "$OPENROUTER_API_KEY")"
@@ -80,6 +86,30 @@ jobs:
             echo "::error::OPENROUTER_API_KEY is set; this experiment must not consume it"
             exit 1
           fi
+          python - <<'EOF'
+          import hashlib, os, sys
+
+          names = ["GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
+                   "GEMINI4_API_KEY"]
+          ids = {}
+          for name in names:
+              value = (os.environ.get(name) or "").strip()
+              ident = hashlib.sha256(value.encode()).hexdigest()[:8] if value else None
+              ids[name] = ident
+              print("{0:<18} present={1:<5} id={2}".format(
+                  name, "yes" if value else "no", ident or "-"))
+          live = [i for i in ids.values() if i]
+          print("distinct credentials: {0} of {1} present".format(
+              len(set(live)), len(live)))
+          if len(set(live)) != len(live):
+              print("::error::two GEMINI secrets hold the same value; "
+                    "they would contend for one quota bucket")
+              sys.exit(1)
+          if len(live) < 2:
+              print("::error::fewer than two Gemini credentials; there is no "
+                    "balancing to validate")
+              sys.exit(1)
+          EOF
 
       # Guard the destination before anything runs, so a future edit to main.py
       # cannot silently point this experiment at the tournament.
@@ -100,12 +130,55 @@ jobs:
         run: poetry run python backtest/pin_models.py --check
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
 
       # Record exactly which chain was generated, so the run's own evidence
       # states what was under test rather than relying on the audit's word.
       - name: Show the generated llms block
         run: sed -n '/^        llms={$/,/^        },$/p' main.py
+
+      # Two properties the generated source must satisfy before the bot runs.
+      - name: Confirm the generated block is balanced and leaks nothing
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
+        run: |
+          python - <<'EOF'
+          import io, os, sys
+
+          src = io.open("main.py", encoding="utf-8").read()
+          start = src.find("        llms={")
+          block = src[start:src.find("        },", start)]
+
+          # 1. every present credential must have produced its own bucket
+          missing = [n for n in ("GEMINI_API_KEY", "GEMINI2_API_KEY",
+                                 "GEMINI3_API_KEY", "GEMINI4_API_KEY")
+                     if os.environ.get(n) and '"{0}"'.format(n) not in block]
+          if missing or "BalancedLlm" not in block:
+              print("::error::block is not balanced over all credentials; "
+                    "missing {0}".format(missing))
+              sys.exit(1)
+
+          # 2. no credential VALUE may appear in the generated source, and
+          #    limiter_key must never be a litellm kwarg
+          for name in ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
+                       "GEMINI4_API_KEY", "GROQ_API_KEY"):
+              value = (os.environ.get(name) or "").strip()
+              if value and value in src:
+                  print("::error::{0}'s VALUE appears in main.py".format(name))
+                  sys.exit(1)
+          if "limiter_key=" in block:
+              print("::error::limiter_key passed as a kwarg; it would be "
+                    "forwarded to litellm as a request parameter")
+              sys.exit(1)
+          print("generated block: balanced, no credential values, "
+                "limiter_key not a kwarg")
+          EOF
 
       # Unmodified command. No extra flags, no altered arguments.
       - name: Run the real pipeline against bot-testing-area
@@ -114,4 +187,7 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

@@ -389,6 +389,56 @@ class BalancingTests(unittest.TestCase):
             BalancedLlm([], [])
 
 
+class ObservabilityTests(unittest.TestCase):
+    """Four buckets share one model string, so `provider=` cannot tell them
+    apart. Without `bucket=` in the log, per-bucket distribution and RPM are
+    not measurable from a real run at all."""
+
+    def setUp(self):
+        rl.reset_registry()
+
+    def tearDown(self):
+        rl.reset_registry()
+
+    def test_the_bucket_is_named_in_the_success_log(self):
+        import logging
+
+        clock = Clock()
+        backend = Recording(GEMINI, clock, limiter_key=rl.GEMINI_BUCKET_KEYS[2])
+        chain = FallbackLlm([backend])
+        with self.assertLogs("backtest.fallback_llm", level=logging.INFO) as caught:
+            run(chain.invoke("x"))
+        joined = "\n".join(caught.output)
+        self.assertIn("bucket=" + rl.GEMINI_BUCKET_KEYS[2], joined)
+
+    def test_a_backend_without_a_bucket_reports_its_model(self):
+        import logging
+
+        clock = Clock()
+        chain = FallbackLlm([Recording(GEMINI, clock)])
+        with self.assertLogs("backtest.fallback_llm", level=logging.INFO) as caught:
+            run(chain.invoke("x"))
+        self.assertIn("bucket=" + GEMINI, "\n".join(caught.output))
+
+    def test_the_log_never_carries_credential_material(self):
+        import logging
+        import os
+
+        os.environ["TMP_LOG_KEY"] = "super-secret-value"
+        try:
+            clock = Clock()
+            backend = bucket_backend(GEMINI, "TMP_LOG_KEY",
+                                     rl.GEMINI_BUCKET_KEYS[1], 180, 1)
+            backend.invoke = Recording(
+                GEMINI, clock, limiter_key=rl.GEMINI_BUCKET_KEYS[1]).invoke
+            chain = FallbackLlm([backend])
+            with self.assertLogs("backtest.fallback_llm", level=logging.INFO) as caught:
+                run(chain.invoke("x"))
+            self.assertNotIn("super-secret-value", "\n".join(caught.output))
+        finally:
+            os.environ.pop("TMP_LOG_KEY", None)
+
+
 class BucketBackendTests(unittest.TestCase):
     def test_limiter_key_is_an_attribute_not_a_litellm_kwarg(self):
         """A limiter_key= kwarg would be forwarded to acompletion as a request
