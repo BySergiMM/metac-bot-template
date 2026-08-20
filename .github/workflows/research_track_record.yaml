@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers"
+        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers; gemini-buckets = are the GEMINI*_API_KEY credentials independent quotas?"
         required: false
         default: "fetch"
         type: choice
-        options: ["fetch", "diagnose", "smoke-test"]
+        options: ["fetch", "diagnose", "smoke-test", "gemini-buckets"]
       tournaments:
         description: "Tournaments forming the coverage denominator (space separated)"
         required: false
@@ -98,6 +98,29 @@ jobs:
         run: |
           pip install --quiet "litellm==1.80.10"
           python research/smoke_test_providers.py --litellm
+
+      # Determines whether the four Gemini credentials draw on separate quota
+      # buckets. A single call per key would only prove validity: the quota is
+      # scoped PerProjectPerModel (measured, run 32295883751), and one project
+      # can mint many keys, so independence is only decidable by interference --
+      # saturate one key, then ask another for a completion inside the same
+      # 60-second window.
+      #
+      # Keys are identified by sha256(key)[:8] and never printed; Google's error
+      # bodies are scanned for live key material and redacted before display.
+      #
+      # This CONSUMES the production GEMINI_API_KEY's per-minute quota for about
+      # a minute, so do not dispatch it while a MiniBench window is open. It
+      # changes no configuration: DEFAULT_LIMITS and the fallback chain are
+      # untouched by this job.
+      - name: Probe Gemini quota buckets
+        if: ${{ github.event.inputs.mode == 'gemini-buckets' }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
+          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
+          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
+        run: python research/probe_gemini_quota_buckets.py --interference
 
       # Prints HTTP statuses and JSON key names only, never question content.
       # Exists because guessing which parameter the gateway rejects would cost
