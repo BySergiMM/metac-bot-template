@@ -3,7 +3,16 @@ name: Forecast on new AI tournament questions
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,27,47 * * * *" # every 20 min, offset off the hour. Make sure to skip already-forecasted questions!
+    # Every 5 minutes, GitHub's documented minimum interval. Measured over
+    # 89 runs (2026-08-17..19), GitHub delivered only 49.2% of the declared
+    # 20-minute schedule -- an effective cadence of 40.6 min against
+    # MiniBench forecast windows that are 1.5-3h wide (418/418 questions
+    # measured, none longer). At */5 the expected detection delay drops
+    # from ~20 min to ~5 min, which is the margin a 60-question burst
+    # needs to finish inside a 90-minute window.
+    # The concurrency group below still guarantees one run at a time, so
+    # a higher rate cannot produce overlapping runners.
+    - cron: "*/5 * * * *"
 
 # Add concurrency group to prevent parallel runs
 concurrency:

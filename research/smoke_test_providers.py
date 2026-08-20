@@ -76,6 +76,49 @@ ROUTES = [
         "litellm_extra": {},
     },
     {
+        # Alibaba Cloud Model Studio, reached through litellm's `dashscope`
+        # provider (litellm/llms/dashscope/chat/transformation.py). The route is
+        # OpenAI-compatible, so the raw-HTTP layer is a plain Bearer POST.
+        #
+        # TWO entries because an Alibaba Cloud account is region-bound and the
+        # two regions are separate endpoints with separate credentials. Both
+        # URLs are taken from litellm's own source, not guessed:
+        #   mainland  transformation.py:_get_openai_compatible_provider_info
+        #   intl      constants.py:554
+        # A key valid in one region returns 401 in the other, so probing both
+        # in one run is what identifies which region this secret belongs to.
+        # The wrong-region probe costs nothing: it never reaches a model.
+        #
+        # litellm reads DASHSCOPE_API_KEY; our secret is ALIBABA_API_KEY, so the
+        # key is passed explicitly (probe_litellm already does this for every
+        # route) and both names are accepted here.
+        #
+        # qwen-turbo is the cheapest model registered in litellm 1.80.10
+        # (input 5e-08/token, output 2e-07/token). NOTE: unlike every other
+        # route in this file, DashScope has NO zero-cost model - see the
+        # cost note in the fallback analysis before wiring it into the chain.
+        "label": "Alibaba DashScope (intl)",
+        "env_candidates": ["ALIBABA_API_KEY", "DASHSCOPE_API_KEY"],
+        "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "auth_scheme": "Bearer",
+        "http_model": "qwen-turbo",
+        "litellm_model": "dashscope/qwen-turbo",
+        "litellm_extra": {
+            "api_base": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        },
+    },
+    {
+        "label": "Alibaba DashScope (mainland)",
+        "env_candidates": ["ALIBABA_API_KEY", "DASHSCOPE_API_KEY"],
+        "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "auth_scheme": "Bearer",
+        "http_model": "qwen-turbo",
+        "litellm_model": "dashscope/qwen-turbo",
+        "litellm_extra": {
+            "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        },
+    },
+    {
         # NOT a litellm provider. Verified: "metaculus" is absent from litellm's
         # LlmProviders enum, so `model="metaculus/..."` is NOT invocable.
         # forecasting-tools implements the prefix itself (general_llm.py:169-215):
@@ -254,6 +297,8 @@ MODEL_LIST_URLS = {
     "Cerebras": "https://api.cerebras.ai/v1/models",
     "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai/models",
     "Metaculus LLM proxy": "https://llm-proxy.metaculus.com/proxy/openai/v1/models",
+    "Alibaba DashScope (intl)": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
+    "Alibaba DashScope (mainland)": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
 }
 
 

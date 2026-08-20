@@ -89,6 +89,12 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          # Candidate provider under evaluation. Scoped to this smoke-test step
+          # only: it is deliberately NOT passed to the fetch/analyse steps, and
+          # NOT to any forecasting workflow, so an untested provider cannot
+          # reach production. smoke_test_providers.py prints variable names,
+          # HTTP statuses and provider replies -- never a credential.
+          ALIBABA_API_KEY: ${{ secrets.ALIBABA_API_KEY }}
         run: |
           pip install --quiet "litellm==1.80.10"
           python research/smoke_test_providers.py --litellm
