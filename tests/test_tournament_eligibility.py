@@ -1,0 +1,182 @@
+"""Static guards on the invariants that keep the bot eligible.
+
+These are not unit tests of behaviour; they are assertions about configuration
+that, if silently changed, would put tournament eligibility at risk without
+breaking anything visible. Each one names the rule it protects.
+
+Source: FutureEval Bot Tournament Resources Page.
+"""
+
+from __future__ import annotations
+
+import io
+import os.path
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def read(*parts: str) -> str:
+    return io.open(os.path.join(ROOT, *parts), encoding="utf-8").read()
+
+
+class PrivateCommentTests(unittest.TestCase):
+    """RULE: "Bots are required to leave comments on questions they forecast,
+    though bots should only leave private comments"."""
+
+    def test_publishing_is_enabled_so_comments_are_actually_posted(self):
+        self.assertIn("publish_reports_to_metaculus=publish_to_metaculus", read("main.py"))
+        self.assertIn("publish_to_metaculus = True", read("main.py"))
+
+    def test_we_never_force_a_comment_public(self):
+        """The SDK defaults is_private=True; overriding it would be the only
+        way to make a bot comment public."""
+        for path in ("main.py", "bot_helpers.py"):
+            self.assertNotIn("is_private=False", read(path))
+            self.assertNotIn("is_private = False", read(path))
+
+
+class NoPreviewTests(unittest.TestCase):
+    """RULE: "A bot maker cannot preview how their bot forecasts on open or
+    upcoming questions and then update their bot based on that preview"."""
+
+    def test_the_research_lab_defaults_to_closed_questions_only(self):
+        src = read("research", "fetch_own_track_record.py")
+        self.assertIn('CLOSED_STATUSES = ["resolved", "closed"]', src)
+
+    def test_open_questions_require_an_explicit_opt_in(self):
+        src = read("research", "fetch_own_track_record.py")
+        self.assertIn('"--include-open"', src)
+        self.assertIn('statuses.append("open")', src)
+
+    def test_no_workflow_ever_passes_include_open(self):
+        """Comment lines are excluded: research_track_record.yaml documents the
+        flag precisely to record that it is NOT passed."""
+        workflows = os.path.join(ROOT, ".github", "workflows")
+        for name in os.listdir(workflows):
+            for line in read(".github", "workflows", name).splitlines():
+                if line.strip().startswith("#"):
+                    continue
+                self.assertNotIn(
+                    "--include-open", line,
+                    "{0} would preview forecasts on open questions".format(name),
+                )
+
+    def test_forecast_content_is_redacted_on_scored_modes(self):
+        """Printing predictions on open questions is itself a preview."""
+        self.assertIn("install_forecast_redaction(run_mode)", read("main.py"))
+
+
+class NoReforecastTests(unittest.TestCase):
+    """RULE: "A bot maker cannot decide that they don't like their bot's
+    forecast and rerun the bot on that question"."""
+
+    def test_the_tournament_path_skips_already_forecasted_questions(self):
+        self.assertIn("skip_previously_forecasted_questions=True", read("main.py"))
+
+    def test_the_only_overrides_are_outside_the_tournament(self):
+        """Two branches set it False. Both must be non-tournament modes."""
+        src = read("main.py")
+        overrides = [
+            i for i, line in enumerate(src.splitlines())
+            if "skip_previously_forecasted_questions = False" in line
+        ]
+        self.assertEqual(len(overrides), 2, "unexpected number of overrides")
+        lines = src.splitlines()
+        for index in overrides:
+            context = "\n".join(lines[max(0, index - 12):index + 3])
+            self.assertTrue(
+                'run_mode == "metaculus_cup"' in context
+                or 'run_mode == "test_questions"' in context,
+                "an override sits outside metaculus_cup/test_questions",
+            )
+
+    def test_the_tournament_branch_does_not_disable_dedup(self):
+        src = read("main.py")
+        start = src.index('if run_mode == "tournament":')
+        end = src.index('elif run_mode == "metaculus_cup":')
+        self.assertNotIn("skip_previously_forecasted_questions", src[start:end])
+
+
+class AlibabaStaysOutTests(unittest.TestCase):
+    """Alibaba was probed and its credential rejected (401, both regions). It
+    must not be in any production path."""
+
+    def test_it_is_absent_from_the_fallback_chain(self):
+        src = read("backtest", "pin_models.py")
+        chain = src[src.index("FALLBACK_CHAIN = ["):src.index("]", src.index("FALLBACK_CHAIN = ["))]
+        for marker in ("dashscope", "alibaba", "qwen"):
+            self.assertNotIn(marker, chain.lower())
+
+    def test_the_production_workflow_does_not_carry_its_credential(self):
+        self.assertNotIn(
+            "ALIBABA_API_KEY",
+            read(".github", "workflows", "run_bot_on_tournament.yaml"),
+        )
+
+    def test_it_lives_only_in_the_analysis_only_probe(self):
+        self.assertIn("dashscope", read("research", "smoke_test_providers.py"))
+        for path in ("main.py", "bot_helpers.py"):
+            self.assertNotIn("dashscope", read(path).lower())
+
+
+class TestsNeverPublishTests(unittest.TestCase):
+    """A test that publishes a forecast would be a rule violation committed by
+    the test suite itself."""
+
+    #: Names that would actually write to Metaculus if CALLED.
+    WRITE_CALLS = frozenset({
+        "publish_report_to_metaculus",
+        "post_question_comment",
+        "post_binary_question_prediction",
+        "post_numeric_question_prediction",
+        "post_multiple_choice_question_prediction",
+    })
+
+    def _test_sources(self):
+        for name in sorted(os.listdir(os.path.join(ROOT, "tests"))):
+            # This file names the forbidden calls in order to forbid them.
+            if not name.endswith(".py") or name == os.path.basename(__file__):
+                continue
+            yield name, read("tests", name)
+
+    def test_no_test_enables_publishing(self):
+        for name, src in self._test_sources():
+            self.assertNotIn("publish_reports_to_metaculus=True", src, name)
+
+    def test_no_test_calls_a_metaculus_write_endpoint(self):
+        """AST, not text: a docstring that MENTIONS a write helper is fine --
+        test_read_api.py names them to assert the read-only client has none.
+        What must not exist is a call expression."""
+        import ast
+
+        for name, src in self._test_sources():
+            for node in ast.walk(ast.parse(src)):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                called = getattr(func, "attr", None) or getattr(func, "id", None)
+                self.assertNotIn(
+                    called, self.WRITE_CALLS,
+                    "{0} CALLS {1}()".format(name, called),
+                )
+
+    def test_the_read_only_api_client_refuses_non_get(self):
+        """research/ must stay incapable of writing to Metaculus."""
+        self.assertIn("GET", read("research", "metaculus_read_api.py"))
+
+
+class ProductionTargetTests(unittest.TestCase):
+    def test_the_e2e_workflow_targets_only_the_practice_area(self):
+        src = read(".github", "workflows", "research_fallback_e2e.yaml")
+        self.assertIn("bot-testing-area", src)
+        self.assertNotIn("CURRENT_AI_COMPETITION_ID: ", src)
+
+    def test_the_tournament_workflow_runs_the_unmodified_entry_point(self):
+        src = read(".github", "workflows", "run_bot_on_tournament.yaml")
+        self.assertIn("poetry run python main.py", src)
+        self.assertNotIn("--mode", src, "production must use the default mode")
+
+
+if __name__ == "__main__":
+    unittest.main()

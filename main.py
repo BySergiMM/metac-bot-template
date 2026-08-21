@@ -9,6 +9,7 @@ import dotenv
 # Runtime helpers (env validation, banners, dependency-warning suppression).
 from bot_helpers import (
     check_environment,
+    install_forecast_redaction,
     print_run_summary_banner,
     print_startup_banner,
     silence_noisy_dependencies,
@@ -664,6 +665,12 @@ if __name__ == "__main__":
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
     check_environment(strict=True)
+    # Keep forecast reasoning and prediction values out of this process's log
+    # stream on scored modes. The repo is a public fork, so Actions logs are
+    # world readable; see bot_helpers.RedactForecastContent for why that
+    # matters for both the private-comment rule and the no-preview rule.
+    # Skipped for test_questions, which targets the unscored practice area.
+    install_forecast_redaction(run_mode)
     publish_to_metaculus = True
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 

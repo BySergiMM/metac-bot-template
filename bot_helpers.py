@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import warnings
 from typing import Any, Sequence
@@ -53,6 +54,86 @@ def silence_noisy_dependencies() -> None:
     litellm_logger = logging.getLogger("LiteLLM")
     litellm_logger.setLevel(logging.WARNING)
     litellm_logger.propagate = False
+
+
+# Log records whose CONTENT is a forecast on a live tournament question.
+# Everything else -- discovery counts, provider/bucket lines, rate-limit waits,
+# "Posted prediction/comment" -- carries no forecast content and is left alone,
+# because that is what every audit of this bot has relied on.
+_FORECAST_CONTENT_PATTERNS = (
+    # main.py: the full research body, logged with the question URL
+    re.compile(r"^(Found Research for URL \S+)", re.S),
+    # main.py: the individual prediction value, for every question type
+    re.compile(r"^(Forecasted URL \S+) with prediction: .*", re.S),
+)
+# forecast_bot.log_report_summary: summaries and first rationales, in one record
+_SUMMARY_MARKERS = ("<<<<<<<<<<<<<<<<<<<< Summary", "First Rationale")
+
+
+class RedactForecastContent(logging.Filter):
+    """Keep forecast reasoning out of the process's log stream.
+
+    Why this exists
+    ---------------
+    This repository is a PUBLIC fork, so GitHub Actions logs are world
+    readable. A tournament run used to emit, in the clear: the full research
+    body, the report summary and first rationale, and each of the five
+    individual predictions -- for a question that was still OPEN.
+
+    Two distinct problems, one cause:
+
+      * Metaculus requires bots to leave PRIVATE comments, published later at
+        Metaculus' own intervals. Publishing the same reasoning immediately in
+        a public log defeats that, whatever the log's medium.
+      * FutureEval forbids a bot maker from previewing their bot's forecasts on
+        open questions and then updating the bot. Printing the predictions puts
+        that preview in front of the maker on every run. Removing it makes the
+        guarantee structural instead of a promise -- the same reasoning that
+        keeps research/ limited to closed questions.
+
+    It redacts CONTENT, never the fact that work happened: the question URL,
+    the call counts, the provider and bucket lines and the publication
+    confirmations all survive, so operational auditing is unaffected.
+
+    Not applied in test_questions mode: bot-testing-area is an unscored
+    practice area, and full output there is what makes it useful.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - a broken record must not kill the run
+            return True
+
+        if any(marker in message for marker in _SUMMARY_MARKERS):
+            record.msg = (
+                "[redacted: per-question summary and rationale withheld from a "
+                "public log while the question may still be open]"
+            )
+            record.args = ()
+            return True
+
+        for pattern in _FORECAST_CONTENT_PATTERNS:
+            match = pattern.match(message)
+            if match:
+                record.msg = match.group(1) + " [content redacted]"
+                record.args = ()
+                return True
+        return True
+
+
+def install_forecast_redaction(run_mode: str) -> bool:
+    """Attach the redaction filter for scored modes. Returns whether it was."""
+    if run_mode == "test_questions":
+        return False
+    log_filter = RedactForecastContent()
+    root = logging.getLogger()
+    root.addFilter(log_filter)
+    # Filters on the root logger are not consulted for records emitted by child
+    # loggers, so the handlers get it too - that is the path every record takes.
+    for handler in root.handlers:
+        handler.addFilter(log_filter)
+    return True
 
 
 def check_environment(strict: bool = True) -> None:

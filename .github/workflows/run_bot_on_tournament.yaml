@@ -14,6 +14,13 @@ on:
     # a higher rate cannot produce overlapping runners.
     - cron: "*/5 * * * *"
 
+# Least privilege: this job checks out the repo and calls external APIs. It
+# never writes to the repository, opens a PR or publishes a package. The
+# research workflows already declare this; without it the job inherits the
+# repository-wide default, which is broader than anything here needs.
+permissions:
+  contents: read
+
 # Add concurrency group to prevent parallel runs
 concurrency:
   group: ${{ github.workflow }}
