@@ -127,7 +127,59 @@ class SummerTemplateBot2026(ForecastBot):
     _max_concurrent_questions = (
         1  # Set this to whatever works for your search-provider/ai-model rate limits
     )
-    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
+    # Bound lazily, per running event loop, instead of once at class-definition
+    # time. main.py runs asyncio.run() twice - once for the tournament, once for
+    # MiniBench - and an asyncio primitive binds to the loop in which a task
+    # first *waits* on it. run_research holds this semaphore across the LLM
+    # call, so with two or more questions the first loop always produces a
+    # waiter and the binding happens. Re-entering it from the second loop then
+    # raises "is bound to a different event loop", which would lose the whole
+    # MiniBench pass -- the larger of the two.
+    #
+    # Same defence, and the same reasoning, as
+    # backtest.rate_limiter.ProviderRateLimiter._get_lock(). The state lives on
+    # the class so every instance still shares one semaphore, exactly as a
+    # class attribute did.
+    # Quoted annotations: these sit at class scope, where PEP 526 evaluates
+    # them at runtime, and `X | None` needs Python 3.10+. Quoting keeps the
+    # module importable on older interpreters without a __future__ import.
+    _concurrency_limiter_instance: "asyncio.Semaphore | None" = None
+    _concurrency_limiter_loop: "object | None" = None
+
+    @property
+    def _concurrency_limiter(self) -> asyncio.Semaphore:
+        """One Semaphore(_max_concurrent_questions), rebuilt per event loop.
+
+        Rebuilding is safe precisely because a loop is only ever abandoned by
+        asyncio.run() returning, which cannot happen while a task still holds
+        or waits on the semaphore. A fresh loop therefore always starts from an
+        uncontended semaphore, which is the same state a fresh process would
+        see. The limit itself is never widened.
+        """
+        cls = type(self)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Accessed outside a running loop. Return whatever already exists
+            # rather than rebuilding: a live semaphore may still be held or
+            # awaited by tasks of a loop that simply is not running at this
+            # instant, and replacing it would let the next holder past a
+            # semaphore the current holder no longer gates -- briefly allowing
+            # two concurrent researches. Only when nothing exists yet does this
+            # fall through and create one.
+            if cls._concurrency_limiter_instance is not None:
+                return cls._concurrency_limiter_instance
+            loop = None
+        if (
+            cls._concurrency_limiter_instance is None
+            or cls._concurrency_limiter_loop is not loop
+        ):
+            cls._concurrency_limiter_instance = asyncio.Semaphore(
+                cls._max_concurrent_questions
+            )
+            cls._concurrency_limiter_loop = loop
+        return cls._concurrency_limiter_instance
+
     _structure_output_validation_samples = 2
 
     ##################################### RESEARCH #####################################
