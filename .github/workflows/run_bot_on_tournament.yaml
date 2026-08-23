@@ -3,16 +3,39 @@ name: Forecast on new AI tournament questions
 on:
   workflow_dispatch:
   schedule:
-    # Every 5 minutes, GitHub's documented minimum interval. Measured over
-    # 89 runs (2026-08-17..19), GitHub delivered only 49.2% of the declared
-    # 20-minute schedule -- an effective cadence of 40.6 min against
-    # MiniBench forecast windows that are 1.5-3h wide (418/418 questions
-    # measured, none longer). At */5 the expected detection delay drops
-    # from ~20 min to ~5 min, which is the margin a 60-question burst
-    # needs to finish inside a 90-minute window.
-    # The concurrency group below still guarantees one run at a time, so
-    # a higher rate cannot produce overlapping runners.
-    - cron: "*/5 * * * *"
+    # MEASURED, not assumed. Over the 200 most recent runs
+    # (2026-08-18T21:59Z .. 2026-08-23T21:31Z) the declared `*/5` schedule
+    # produced:
+    #     gap median 32.2 min, p75 41.5, p90 55.7, max 109.3, mean 36.0
+    #     gaps <= 10 min: 0 of 199
+    # That is ~14% of the requested 12 events/hour. An earlier comment here
+    # claimed `*/5` buys "~5 min" detection; the data contradicts it and the
+    # claim has been removed.
+    #
+    # The cause is delivery, not this repository:
+    #   * queue delay (startedAt - createdAt) was 0s on all 200 runs, so the
+    #     concurrency group below is not holding anything back;
+    #   * run duration is 62s median / 292s max, so runs are not overlapping
+    #     into each other;
+    #   * GitHub documents the mechanism directly -- "The schedule event can
+    #     be delayed during periods of high loads of GitHub Actions workflow
+    #     runs. High load times include the start of every hour. If the load
+    #     is sufficiently high enough, some queued jobs may be dropped."
+    # Events are being DROPPED upstream. Nothing in this repository can raise
+    # the delivery rate.
+    #
+    # What this cron changes is PHASE, which is the one lever GitHub does
+    # offer: it recommends "scheduling workflows at different times within
+    # the hour rather than at the start". `*/5` fires at :00,:05,:10... --
+    # precisely the minutes every other `*/5` and `*/15` cron on the platform
+    # also asks for. The list below keeps the same 12 requests per hour and
+    # the same 5-minute spacing, offset by two minutes off that grid.
+    #
+    # HONEST STATUS: this is an UNVERIFIED mitigation. The baseline above is
+    # recorded so the change is falsifiable -- re-measure after a few days
+    # and revert if the distribution has not moved. Reliable 5-minute
+    # detection is NOT achievable through cron alone; see docs/cadence.md.
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
 
 # Least privilege: this job checks out the repo and calls external APIs. It
 # never writes to the repository, opens a PR or publishes a package. The
@@ -62,15 +85,43 @@ jobs:
       - name: Pin LLM models
         run: python backtest/pin_models.py
         env:
+          # R11 -- ONE Gemini credential, deliberately.
+          #
+          # GEMINI2/3/4_API_KEY are still configured as repository secrets and
+          # the four-bucket code path is still present and tested. They are NOT
+          # passed to production, which is what decides how many buckets exist:
+          # pin_models reads os.environ at patch time and
+          # `BALANCED = len(ACTIVE_GEMINI_BUCKETS) > 1`, so one credential
+          # generates exactly the single-chain block that existed before
+          # buckets, with no BalancedLlm wrapper.
+          #
+          # Why: four credentials from four Google projects, driven by one
+          # application, obtain 4 x 15 = 60 RPM where one project allows 15.
+          #   FACT   Google documents "Rate limits are applied per project, not
+          #          per API key", and separate projects as the mechanism for
+          #          isolated quota.
+          #   FACT   Google APIs ToS 2.d: Google sets and enforces API limits
+          #          "in our sole discretion" and the developer agrees not to
+          #          attempt to circumvent them; exceeding documented limits
+          #          needs Google's express written consent.
+          #   UNKNOWN No Google document states whether one workload spanning
+          #          several projects is permitted or is circumvention.
+          # "Not mentioned" is not "allowed", and the downside is asymmetric: a
+          # quota-circumvention finding restricts the projects, and it would do
+          # so mid-tournament.
+          #
+          # The cost of one bucket is throughput in a DEGRADED mode only.
+          # Gemini is the second link of OpenRouter -> Gemini -> Groq and is
+          # reached only when OpenRouter actually fails. A saturated bucket
+          # makes the limiter WAIT, not fail, and past the 300s ceiling it
+          # raises RateLimitTimeout, which fails over to Groq. Prediction
+          # counts, aggregation and the success threshold are untouched either
+          # way.
+          #
+          # To re-enable after establishing compliance: add the three env vars
+          # back to BOTH this step and the pin step above, and delete the
+          # assertion in tests/test_production_invariants.py.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # One Gemini quota bucket per credential. These must be present HERE,
-          # not only on the bot step: pin_models reads os.environ at PATCH time
-          # to decide how many chains to generate, so a key that reaches only
-          # the bot produces a block with fewer buckets than credentials and
-          # the extra quota is silently never used.
-          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
-          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
-          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       - name: Run bot
         run: |
@@ -88,15 +139,6 @@ jobs:
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           # Fallback providers. Both verified by research/smoke_test_providers.py
           # before being wired in; absent keys simply disable their leg.
+          # See the R11 note on the pin step above: one bucket, on purpose.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # bucket_backend reads these by NAME at bot runtime, so the values are
-          # needed here as well as on the pin step above. Proven independent
-          # quota buckets (15 RPM each) by interference in runs 32380381980 and
-          # 32381181256, and exercised end to end on bot-testing-area in run
-          # 32385978761: 154 calls spread 41/36/41/36, zero 429s, zero
-          # RateLimitTimeouts, 3.03x faster than the same run on one bucket.
-          # An absent key simply means one bucket fewer.
-          GEMINI2_API_KEY: ${{ secrets.GEMINI2_API_KEY }}
-          GEMINI3_API_KEY: ${{ secrets.GEMINI3_API_KEY }}
-          GEMINI4_API_KEY: ${{ secrets.GEMINI4_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

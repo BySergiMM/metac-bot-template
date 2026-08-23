@@ -3,6 +3,12 @@ name: MiniBench Backtest
 on:
   workflow_dispatch:
 
+# Least privilege: this job calls external APIs and never writes to the
+# repository, opens a PR or publishes a package. Without this it inherits
+# the repository-wide default, which is broader than anything here needs.
+permissions:
+  contents: read
+
 jobs:
   backtest:
     runs-on: ubuntu-latest

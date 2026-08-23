@@ -72,7 +72,11 @@ class CredentialHygieneTests(unittest.TestCase):
         self.assertNotEqual(probe.safe_id("abc123"), probe.safe_id("abc124"))
 
     def test_safe_id_reveals_no_key_material(self):
-        key = "AIzaSyREALLOOKINGKEY0123456789"
+        # Deliberately self-describing rather than key-shaped-and-opaque.
+        # The assertions below hold for ANY string, so nothing is weakened,
+        # and a public repository should not carry text that a secret
+        # scanner -- or a reader -- has to measure to rule out.
+        key = "AIza-SYNTHETIC-FIXTURE-NOT-A-REAL-CREDENTIAL"
         ident = probe.safe_id(key)
         self.assertEqual(len(ident), 8)
         self.assertNotIn(ident, key)

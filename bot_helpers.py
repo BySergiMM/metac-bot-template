@@ -12,6 +12,8 @@ import logging
 import os
 import re
 import sys
+import traceback
+import unicodedata
 import warnings
 from typing import Any, Sequence
 
@@ -60,14 +62,144 @@ def silence_noisy_dependencies() -> None:
 # Everything else -- discovery counts, provider/bucket lines, rate-limit waits,
 # "Posted prediction/comment" -- carries no forecast content and is left alone,
 # because that is what every audit of this bot has relied on.
+#
+# LAYER 2 of two. Layer 1 is log_forecast_content(), which stops the content
+# reaching logging at all for the sites main.py owns. These patterns exist so a
+# revert of layer 1, or an upstream forecasting_tools record we do not own,
+# still cannot put forecast content in a public log.
 _FORECAST_CONTENT_PATTERNS = (
     # main.py: the full research body, logged with the question URL
     re.compile(r"^(Found Research for URL \S+)", re.S),
     # main.py: the individual prediction value, for every question type
     re.compile(r"^(Forecasted URL \S+) with prediction: .*", re.S),
+    # main.py: the model's full rationale, for every question type. The
+    # forecasting prompts end with 'Probability: ZZ%', so this record carried
+    # both the reasoning and the number. Missing from the original filter --
+    # production runs 32239144510 / 32268972325 / 32366841649 emitted it whole.
+    re.compile(r"^(Reasoning for URL \S+)", re.S),
 )
 # forecast_bot.log_report_summary: summaries and first rationales, in one record
 _SUMMARY_MARKERS = ("<<<<<<<<<<<<<<<<<<<< Summary", "First Rationale")
+
+# LAYER 3. Pattern matching on a known headline only protects records whose
+# headline we already know about. These match the forecast VALUE itself,
+# wherever it appears -- an exception message, a traceback tail, a
+# forecasting_tools record nobody has read yet. A record carrying any of these
+# is redacted whole, because there is no safe prefix to keep when the number
+# can be anywhere in it.
+#
+# Deliberately narrow, so operational lines survive: `rpm=15.0`,
+# `latency_s=1.05`, `wait_ms=0` and `Posted prediction on question 45375` all
+# contain digits and none of them match.
+#
+# NO \b ANCHORS, and matched case-insensitively against a NORMALISED copy.
+# `\bProbability:` looks tighter but is trivially evaded: in
+# "\x1b[31mProbability: 12%" the escape ends in `m`, so `m` meets `P` and
+# there is no word boundary at all. The adversarial suite caught that; it was
+# not visible by reading the pattern. Anything that can prefix a word
+# character to the token defeats a leading \b, so the anchors are gone.
+_FORECAST_VALUE_SIGNALS = (
+    re.compile(r"Probability\s*:\s*\d", re.I),   # the binary prompt's own format
+    re.compile(r"probability\s*=\s*\d", re.I),   # PredictedOption repr
+    re.compile(r"PredictedOption\s*\(", re.I),   # multiple-choice repr
+    re.compile(r"predicted_options\s*=", re.I),  # PredictedOptionList repr
+    re.compile(r"declared_percentiles\s*=", re.I),  # NumericDistribution repr
+    re.compile(r"Percentile\s*\(", re.I),        # numeric/date percentile repr
+    re.compile(r"prediction_in_decimal", re.I),  # BinaryPrediction field name
+    # The comment body's OWN forecast display, from
+    # forecast_bot._create_comment: "*Final Prediction*: 42%". A Metaculus
+    # error response can echo the submitted comment back, which puts the
+    # forecast inside an exception message -- caught by tests/test_publication
+    # ::test_error_details_are_bounded_and_value_free, not by inspection.
+    re.compile(r"\*\s*Final Prediction\s*\*", re.I),
+)
+
+# Upstream records that carry a payload of provider/model text rather than a
+# forecast value. The headline is operationally useful; the payload is not
+# ours to publish. Keyed on the literal prefix forecasting_tools emits.
+_UPSTREAM_PAYLOAD_PREFIXES = (
+    "Encountered errors while researching:",
+    "Encountered errors while predicting:",
+    "Could not summarize research.",
+    "Exception occurred during forecasting:",
+    "Error while processing question url:",
+)
+
+# Anything longer than this in a sanitised error string is provider prose, not
+# a diagnostic. 200 was the pre-existing banner budget; keeping it means the
+# banner's shape does not change.
+_ERROR_TEXT_LIMIT = 200
+
+
+# Control and escape sequences a terminal would render but a matcher would
+# trip over. Stripped before matching, never from what is emitted.
+_ANSI_AND_CONTROL = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f]")
+
+# The interpreter-generated locator line of a traceback frame:
+#     File "/path/to/file.py", line 137, in some_function
+# Path, line number and symbol name only -- never a runtime value. The frame's
+# SOURCE line, which follows it, is not covered and is scrubbed.
+_TRACEBACK_LOCATOR = re.compile(r'\s*File "[^"]*", line \d+(, in .*)?$')
+
+
+def _normalise_for_matching(text: str) -> str:
+    """A canonical copy to run the signals against.
+
+    Matching happens on this; redaction always applies to the ORIGINAL record,
+    so normalisation can be as aggressive as it likes without altering output.
+
+      * NFKC folds fullwidth and compatibility forms, so a model answering
+        with fullwidth characters cannot slip a value past a plain match.
+      * ANSI/control sequences are removed, because they let arbitrary bytes
+        sit between or beside the characters of a token.
+    """
+    return _ANSI_AND_CONTROL.sub("", unicodedata.normalize("NFKC", text))
+
+
+def carries_forecast_value(text: str) -> bool:
+    """Whether this text contains a forecast value in any recognised shape."""
+    candidate = _normalise_for_matching(text)
+    return any(signal.search(candidate) for signal in _FORECAST_VALUE_SIGNALS)
+
+
+# "module.path.ExceptionType" at the head of a traceback's final line. Symbol
+# names only, so this half is safe to keep -- and it is the half an operator
+# actually triages on.
+_EXCEPTION_TYPE = re.compile(r"^(\s*)([A-Za-z_][\w.]*)(:\s)(.*)$", re.S)
+
+
+def _scrub_exception_line(line: str) -> str:
+    """Keep the exception TYPE, scrub the message after it.
+
+    `ValueError: <anything the model produced>` becomes
+    `ValueError: [redacted...]`. Dropping the whole line loses the single most
+    useful triage signal in a traceback, which the adversarial suite caught.
+    """
+    match = _EXCEPTION_TYPE.match(line)
+    if not match:
+        return scrub(line)
+    indent, exception_type, separator, detail = match.groups()
+    return indent + exception_type + separator + scrub(detail)
+
+
+def scrub(text: object, limit: int = _ERROR_TEXT_LIMIT) -> str:
+    """A log-safe rendering of arbitrary error text.
+
+    Used by BOTH the logging filter and print_run_summary_banner, so the
+    stdout path and the stderr path cannot drift apart -- the banner used to
+    truncate to 200 characters with no content check at all, which let a
+    provider body or a parsed probability through whenever an exception
+    message happened to carry one.
+
+    Collapses newlines (a traceback in a banner is unreadable anyway), drops
+    the record entirely if it carries a forecast value, and truncates.
+    """
+    rendered = str(text).replace("\n", " ").replace("\r", " ")
+    if carries_forecast_value(rendered):
+        return "[redacted: carried a forecast value]"
+    if len(rendered) > limit:
+        rendered = rendered[:limit] + "..."
+    return rendered
 
 
 class RedactForecastContent(logging.Filter):
@@ -103,37 +235,216 @@ class RedactForecastContent(logging.Filter):
         try:
             message = record.getMessage()
         except Exception:  # noqa: BLE001 - a broken record must not kill the run
-            return True
+            message = ""
+
+        # ALWAYS, and before any message check can return early. exc_info and
+        # stack_info are rendered by the HANDLER, after every filter has run,
+        # and getMessage() does not include them -- so a record whose message
+        # is perfectly operational can still print an exception carrying the
+        # model's output. litellm alone raises from 144 logger.exception()
+        # sites and its exceptions embed the provider response body.
+        self._sanitise_attached_traceback(record)
 
         if any(marker in message for marker in _SUMMARY_MARKERS):
-            record.msg = (
+            return self._replace(
+                record,
                 "[redacted: per-question summary and rationale withheld from a "
-                "public log while the question may still be open]"
+                "public log while the question may still be open]",
             )
-            record.args = ()
-            return True
 
         for pattern in _FORECAST_CONTENT_PATTERNS:
             match = pattern.match(message)
             if match:
-                record.msg = match.group(1) + " [content redacted]"
-                record.args = ()
-                return True
+                return self._replace(record, match.group(1) + " [content redacted]")
+
+        # Upstream payload records: keep the headline, drop what follows. The
+        # headline is what tells an operator that a question errored at all.
+        for prefix in _UPSTREAM_PAYLOAD_PREFIXES:
+            if message.startswith(prefix):
+                return self._replace(
+                    record, prefix + " [detail redacted from a public log]"
+                )
+
+        # Last line of defence: the value itself, wherever it sits. Nothing is
+        # preserved here on purpose -- if a probability can appear anywhere in
+        # the record, no prefix of it is provably safe to keep.
+        if carries_forecast_value(message):
+            return self._replace(
+                record,
+                "[redacted: record carried a forecast value; see the Metaculus "
+                "comment for the forecast itself]",
+            )
+        return True
+
+    @staticmethod
+    def _sanitise_attached_traceback(record: logging.LogRecord) -> None:
+        """Scrub the exception text a handler would append to this record.
+
+        Kept verbatim: the `File "...", line N, in func` locator lines and the
+        structural markers. Those are the operationally useful half of a
+        traceback -- they say WHERE it failed -- and they are generated by the
+        interpreter from path, line number and symbol names, so no runtime
+        value can reach them.
+
+        Scrubbed: everything else. That means the exception message lines,
+        which is where a provider response body or a parser complaint quoting
+        the model lands, AND the frames' source-text lines. The source line
+        was originally preserved on the argument that it shows the literal
+        (`f"...{reasoning}"`) rather than the value -- true for this
+        repository's own code, but it is still arbitrary text from an
+        arbitrary dependency, and the adversarial suite demonstrated a frame
+        whose literal carried the value outright.
+        """
+        if not record.exc_info and not record.exc_text and not record.stack_info:
+            return
+
+        if record.stack_info and carries_forecast_value(record.stack_info):
+            record.stack_info = "[stack redacted: carried a forecast value]"
+
+        rendered = record.exc_text
+        if rendered is None and record.exc_info:
+            try:
+                rendered = "".join(traceback.format_exception(*record.exc_info))
+            except Exception:  # noqa: BLE001 - a broken record must not kill the run
+                rendered = "[exception could not be formatted]"
+        if not rendered:
+            return
+
+        safe_lines = []
+        for line in rendered.splitlines():
+            if _TRACEBACK_LOCATOR.match(line) or line.startswith(
+                ("Traceback", "During handling", "The above exception")
+            ):
+                safe_lines.append(line)
+            else:
+                safe_lines.append(_scrub_exception_line(line))
+        # exc_info must be cleared: Formatter only uses exc_text when
+        # exc_info is falsy or exc_text is already set, and leaving the live
+        # exception around invites a second formatter re-rendering it raw.
+        record.exc_text = "\n".join(safe_lines)
+        record.exc_info = None
+
+    @staticmethod
+    def _replace(record: logging.LogRecord, text: str) -> bool:
+        """Overwrite a record in place. args must be cleared too, or getMessage
+        re-applies %-formatting to the replacement and raises or re-expands."""
+        record.msg = text
+        record.args = ()
+        # The message was bad enough to replace wholesale, so the attached
+        # exception goes too -- _sanitise_attached_traceback has already run,
+        # but a scrubbed traceback beside a fully redacted message tells an
+        # operator nothing it does not already know.
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
         return True
 
 
+# Whether this process is running against a SCORED tournament. Defaults to
+# True -- fail closed. A caller that never declares a mode gets the safe
+# behaviour, so forgetting to call install_forecast_redaction() cannot be the
+# thing that publishes a rationale.
+_withhold_forecast_content = True
+
+
 def install_forecast_redaction(run_mode: str) -> bool:
-    """Attach the redaction filter for scored modes. Returns whether it was."""
+    """Attach the redaction filter for scored modes. Returns whether it was.
+
+    Also sets the process-wide flag log_forecast_content() reads, so layer 1
+    (suppress at the source) and layer 2 (filter the stream) are switched by
+    one decision and cannot disagree about which mode this is.
+    """
+    global _withhold_forecast_content
     if run_mode == "test_questions":
+        # bot-testing-area is unscored; full output is what makes it useful.
+        _withhold_forecast_content = False
         return False
-    log_filter = RedactForecastContent()
+    _withhold_forecast_content = True
     root = logging.getLogger()
-    root.addFilter(log_filter)
+    _add_filter_once(root)
     # Filters on the root logger are not consulted for records emitted by child
     # loggers, so the handlers get it too - that is the path every record takes.
     for handler in root.handlers:
-        handler.addFilter(log_filter)
+        _add_filter_once(handler)
+    # ...and every handler that already exists anywhere else, plus every
+    # handler added from now on. A handler attached to a CHILD logger is
+    # called BEFORE the root handlers and would otherwise never see this
+    # filter: `logging.getLogger("some.library").addHandler(...)` was measured
+    # emitting an unredacted rationale while the root handler emitted the
+    # redacted one. Nothing in the current pipeline does that, but
+    # silence_noisy_dependencies() exists precisely because dependencies
+    # rearrange their own loggers, and Streamlit installs a whole hierarchy.
+    for existing in list(logging.Logger.manager.loggerDict.values()):
+        for handler in getattr(existing, "handlers", []) or []:
+            _add_filter_once(handler)
+    _install_handler_hook()
     return True
+
+
+#: ONE filter object for the whole process. Not one per call: every record is
+#: run through every filter on its handler, so a fresh instance per call makes
+#: log handling O(number of calls) per record. Repeated installation is
+#: normal -- tests do it constantly, and nothing stops a caller doing it twice.
+_REDACTION_FILTER = RedactForecastContent()
+
+
+def _add_filter_once(target: Any) -> None:
+    """Attach the redaction filter unless this target already has one.
+
+    Idempotent by identity AND by type, so a target that somehow acquired a
+    different RedactForecastContent instance is not given a second one.
+    """
+    try:
+        for existing in getattr(target, "filters", []) or []:
+            if isinstance(existing, RedactForecastContent):
+                return
+        target.addFilter(_REDACTION_FILTER)
+    except Exception:  # noqa: BLE001 - logging setup must never kill a run
+        pass
+
+
+def _install_handler_hook() -> None:
+    """Make every future addHandler() carry the redaction filter.
+
+    Patched once and idempotently. Deliberately narrow: it adds a filter and
+    changes nothing else about logging, so a dependency that installs its own
+    handler still gets its handler -- it just cannot get an unfiltered one.
+    """
+    if getattr(logging.Logger.addHandler, "_redaction_hook", False):
+        return
+    original = logging.Logger.addHandler
+
+    def add_handler_with_redaction(self, hdlr):  # type: ignore[no-untyped-def]
+        _add_filter_once(hdlr)
+        return original(self, hdlr)
+
+    add_handler_with_redaction._redaction_hook = True  # type: ignore[attr-defined]
+    logging.Logger.addHandler = add_handler_with_redaction  # type: ignore[assignment]
+
+
+def forecast_content_is_withheld() -> bool:
+    """Whether forecast content is being kept out of this process's output."""
+    return _withhold_forecast_content
+
+
+def log_forecast_content(
+    target_logger: logging.Logger, headline: str, content: object
+) -> None:
+    """Log `headline`, and `content` only where publishing it is safe.
+
+    LAYER 1, and the one that actually matters: on a scored run the content is
+    never handed to logging at all, so no handler, formatter, third-party
+    filter or future refactor can put it on a public stream. The filter in this
+    module stays as layer 2 for the records this function does not own.
+
+    `headline` must be free of forecast content by construction -- it is a URL
+    and a fixed label. It is deliberately kept, because every audit of this bot
+    reads which questions were worked on out of these lines.
+    """
+    if _withhold_forecast_content:
+        target_logger.info("%s [content withheld from a public log]", headline)
+    else:
+        target_logger.info("%s: %s", headline, content)
 
 
 def check_environment(strict: bool = True) -> None:
@@ -183,11 +494,23 @@ def print_run_summary_banner(
     filtering. Shows count, per-question URLs, and any failure tracebacks.
     If tournament_url is given, it's included as a footer link.
     """
-    # Lazy import so this module is usable in contexts where forecasting_tools
-    # isn't installed (e.g. unit tests of the banner format).
-    from forecasting_tools import ForecastReport
+    # Lazy AND defensive. This banner is the last thing a run does, after the
+    # forecasts are already published, so it must never be the thing that
+    # turns a successful run into a failed one. If the symbol is unavailable
+    # the partition degrades to "anything that is not an exception is a
+    # report", which is exactly what forecast_questions returns anyway.
+    try:
+        from forecasting_tools import ForecastReport
 
-    valid = [r for r in forecast_reports if isinstance(r, ForecastReport)]
+        def _is_report(item: Any) -> bool:
+            return isinstance(item, ForecastReport)
+
+    except Exception:  # noqa: BLE001 - any import problem must degrade, not raise
+
+        def _is_report(item: Any) -> bool:
+            return not isinstance(item, BaseException)
+
+    valid = [r for r in forecast_reports if _is_report(r)]
     exceptions = [r for r in forecast_reports if isinstance(r, BaseException)]
     banner = "=" * 80
 
@@ -221,10 +544,10 @@ def print_run_summary_banner(
     if exceptions:
         print()
         for exc in exceptions:
-            msg = str(exc)
-            if len(msg) > 200:
-                msg = msg[:200] + "..."
-            print(f"  ❌ {type(exc).__name__}: {msg}")
+            # scrub(), not a bare truncation: this is print(), so no logging
+            # filter sees it. A provider error body or a parsed probability
+            # inside an exception message used to reach stdout untouched.
+            print(f"  ❌ {type(exc).__name__}: {scrub(exc)}")
 
     print(banner)
     print()
