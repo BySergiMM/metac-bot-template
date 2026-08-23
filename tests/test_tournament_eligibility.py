@@ -133,6 +133,14 @@ class TestsNeverPublishTests(unittest.TestCase):
         "post_multiple_choice_question_prediction",
     })
 
+    #: Assignments that replace the real transport on the real client class.
+    #: A file containing BOTH has made it impossible for any code in it to
+    #: reach Metaculus, whatever it calls afterwards.
+    TRANSPORT_NEUTRALISERS = (
+        "MetaculusClient.post_question_comment =",
+        "MetaculusClient._post_question_prediction =",
+    )
+
     def _test_sources(self):
         for name in sorted(os.listdir(os.path.join(ROOT, "tests"))):
             # This file names the forbidden calls in order to forbid them.
@@ -140,17 +148,40 @@ class TestsNeverPublishTests(unittest.TestCase):
                 continue
             yield name, read("tests", name)
 
+    @classmethod
+    def _neutralises_the_transport(cls, src):
+        return all(marker in src for marker in cls.TRANSPORT_NEUTRALISERS)
+
     def test_no_test_enables_publishing(self):
+        """Same exemption as the write-endpoint guard below, for the same
+        reason: a file that has provably replaced BOTH network methods on the
+        real MetaculusClient cannot publish, whatever it enables. The end-to-end
+        pipeline test has to enable publishing to exercise publication at all."""
         for name, src in self._test_sources():
+            if self._neutralises_the_transport(src):
+                continue
             self.assertNotIn("publish_reports_to_metaculus=True", src, name)
 
     def test_no_test_calls_a_metaculus_write_endpoint(self):
         """AST, not text: a docstring that MENTIONS a write helper is fine --
         test_read_api.py names them to assert the read-only client has none.
-        What must not exist is a call expression."""
+        What must not exist is a call expression.
+
+        A file that has provably replaced BOTH network methods on the real
+        MetaculusClient is exempt, because the property this guard exists to
+        protect -- "no test can reach Metaculus" -- is then guaranteed by
+        construction rather than by a naming convention. tests/test_publication
+        does exactly that: the publication state machine cannot be tested
+        without calling the two methods it wraps.
+
+        This is deliberately stricter than an exemption list keyed on
+        filenames, which a new file could join without proving anything.
+        """
         import ast
 
         for name, src in self._test_sources():
+            if self._neutralises_the_transport(src):
+                continue
             for node in ast.walk(ast.parse(src)):
                 if not isinstance(node, ast.Call):
                     continue
@@ -160,6 +191,28 @@ class TestsNeverPublishTests(unittest.TestCase):
                     called, self.WRITE_CALLS,
                     "{0} CALLS {1}()".format(name, called),
                 )
+
+    def test_every_exempt_file_also_restores_the_real_transport(self):
+        """An exemption that leaked would poison every later test module."""
+        exempt = [
+            name for name, src in self._test_sources()
+            if self._neutralises_the_transport(src)
+        ]
+        self.assertTrue(exempt, "the exemption path must stay exercised")
+        for name in exempt:
+            src = read("tests", name)
+            self.assertIn("addCleanup(setattr, MetaculusClient", src, name)
+
+    def test_the_neutralisation_check_is_not_trivially_satisfiable(self):
+        """Guards the guard: a file that only mentions one half is not exempt."""
+        self.assertFalse(self._neutralises_the_transport(
+            "MetaculusClient.post_question_comment = fake"
+        ))
+        self.assertFalse(self._neutralises_the_transport("nothing here"))
+        self.assertTrue(self._neutralises_the_transport(
+            "MetaculusClient.post_question_comment = a\n"
+            "MetaculusClient._post_question_prediction = b\n"
+        ))
 
     def test_the_read_only_api_client_refuses_non_get(self):
         """research/ must stay incapable of writing to Metaculus."""

@@ -1,0 +1,109 @@
+name: CI
+
+# The release gate. Before this existed, the only way to run the test suite in
+# CI was to dispatch "Research - Track Record (read-only)" by hand, so a change
+# could reach main -- and therefore the scheduled tournament publisher -- with
+# nothing having run it.
+#
+# This job is deliberately incapable of touching production:
+#   * it declares NO secrets, so it holds no Metaculus token and no provider
+#     credential and cannot authenticate to anything;
+#   * it never runs main.py, so it cannot discover or publish a forecast;
+#   * `permissions: contents: read` is the whole grant.
+#
+# tests/test_production_invariants.py::WorkflowInvariants asserts those
+# properties from the repository side as well, so weakening this file fails
+# the suite it is running.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per ref, and cancel superseded runs: unlike the publisher, a stale test run
+  # has no side effects worth preserving.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what every production workflow pins. 3.12 is here so an
+        # incompatibility shows up in CI rather than on the day the runner
+        # image moves.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      # Whitespace damage and unresolved conflict markers, before anything
+      # slower runs.
+      - name: Check the diff is clean
+        run: git diff --check HEAD
+
+      # Fails the job if any credential-shaped env var is somehow present, so
+      # a future edit adding `env: secrets.*` to this workflow is caught here
+      # rather than by review.
+      - name: Confirm no credentials are available to the tests
+        run: |
+          python - <<'EOF'
+          import os, sys
+          leaked = [
+              name for name in os.environ
+              if name.endswith(("_API_KEY", "_TOKEN", "_SECRET"))
+              and name not in ("GITHUB_TOKEN",)
+              and os.environ.get(name)
+          ]
+          if leaked:
+              print("::error::CI must run without credentials; found: "
+                    + ", ".join(sorted(leaked)))
+              sys.exit(1)
+          print("no provider or Metaculus credentials in the environment")
+          EOF
+
+      - name: Run the test suite
+        run: poetry run python -m unittest discover -s tests -t . -v
+
+      # The suite covers the generator's OUTPUT; this proves the generator
+      # itself still runs to completion as the production workflow invokes it
+      # (bare `python`, not `poetry run`, with no repo root on sys.path).
+      # No credentials are set, so it generates the no-fallback form.
+      - name: Confirm the model pinner runs the way production runs it
+        run: |
+          cp main.py /tmp/main.py.orig
+          python backtest/pin_models.py
+          python -c "import ast, io; ast.parse(io.open('main.py', encoding='utf-8').read())"
+          cp /tmp/main.py.orig main.py
+
+      - name: Confirm the working tree is unchanged by the tests
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the test run modified tracked files"
+            git status --porcelain
+            exit 1
+          fi

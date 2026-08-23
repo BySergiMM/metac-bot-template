@@ -10,10 +10,12 @@ import dotenv
 from bot_helpers import (
     check_environment,
     install_forecast_redaction,
+    log_forecast_content,
     print_run_summary_banner,
     print_startup_banner,
     silence_noisy_dependencies,
 )
+from publication import PublishingClient, print_publication_report
 
 silence_noisy_dependencies()
 
@@ -231,7 +233,9 @@ class SummerTemplateBot2026(ForecastBot):
                 research = ""
             else:
                 research = await self.get_llm("researcher", "llm").invoke(prompt)
-            logger.info(f"Found Research for URL {question.page_url}:\n{research}")
+            log_forecast_content(
+                logger, f"Found Research for URL {question.page_url}", research
+            )
             return research
 
     ##################################### BINARY QUESTIONS #####################################
@@ -282,7 +286,9 @@ class SummerTemplateBot2026(ForecastBot):
         prompt: str,
     ) -> ReasonedPrediction[float]:
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        log_forecast_content(
+            logger, f"Reasoning for URL {question.page_url}", reasoning
+        )
         binary_prediction: BinaryPrediction = await structure_output(
             reasoning,
             BinaryPrediction,
@@ -291,8 +297,10 @@ class SummerTemplateBot2026(ForecastBot):
         )
         decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
 
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
+        log_forecast_content(
+            logger,
+            f"Forecasted URL {question.page_url} with prediction",
+            decimal_pred,
         )
         return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
 
@@ -356,7 +364,9 @@ class SummerTemplateBot2026(ForecastBot):
             """
         )
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        log_forecast_content(
+            logger, f"Reasoning for URL {question.page_url}", reasoning
+        )
         predicted_option_list: PredictedOptionList = await structure_output(
             text_to_structure=reasoning,
             output_type=PredictedOptionList,
@@ -365,8 +375,10 @@ class SummerTemplateBot2026(ForecastBot):
             additional_instructions=parsing_instructions,
         )
 
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."
+        log_forecast_content(
+            logger,
+            f"Forecasted URL {question.page_url} with prediction",
+            predicted_option_list,
         )
         return ReasonedPrediction(
             prediction_value=predicted_option_list, reasoning=reasoning
@@ -439,7 +451,9 @@ class SummerTemplateBot2026(ForecastBot):
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        log_forecast_content(
+            logger, f"Reasoning for URL {question.page_url}", reasoning
+        )
         parsing_instructions = clean_indents(
             f"""
             The text given to you is trying to give a forecast distribution for a numeric question.
@@ -461,8 +475,10 @@ class SummerTemplateBot2026(ForecastBot):
             num_validation_samples=self._structure_output_validation_samples,
         )
         prediction = NumericDistribution.from_question(percentile_list, question)
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
+        log_forecast_content(
+            logger,
+            f"Forecasted URL {question.page_url} with prediction",
+            prediction.declared_percentiles,
         )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
 
@@ -533,7 +549,9 @@ class SummerTemplateBot2026(ForecastBot):
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
         reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        log_forecast_content(
+            logger, f"Reasoning for URL {question.page_url}", reasoning
+        )
         parsing_instructions = clean_indents(
             f"""
             The text given to you is trying to give a forecast distribution for a date question.
@@ -559,8 +577,10 @@ class SummerTemplateBot2026(ForecastBot):
             for percentile in date_percentile_list
         ]
         prediction = NumericDistribution.from_question(percentile_list, question)
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
+        log_forecast_content(
+            logger,
+            f"Forecasted URL {question.page_url} with prediction",
+            prediction.declared_percentiles,
         )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
 
@@ -729,7 +749,17 @@ if __name__ == "__main__":
     # Configure the bot. The `llms=` block below is commented out to use
     # whichever default models forecasting-tools picks based on your env vars;
     # uncomment and edit to pin specific models.
+    # One client for the whole run, injected rather than default-constructed.
+    # It is the seam for three separate defects: it pages discovery to the end
+    # (R7), it refuses a second prediction per question or a second comment per
+    # post (R3, R6), and it retries the eligibility-critical comment past the
+    # SDK's own budget and names the orphan when it still fails (R1).
+    # forecast_bot.py uses it at :166 for discovery and :416 for publication,
+    # so both paths are covered by this one object.
+    client = PublishingClient()
+
     template_bot = SummerTemplateBot2026(
+        metaculus_client=client,
         research_reports_per_question=1,
         predictions_per_research_report=5,
         use_research_summary_to_forecast=False,
@@ -762,7 +792,6 @@ if __name__ == "__main__":
     # Dispatch on mode. Each branch produces a list of ForecastReport (or
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
-    client = MetaculusClient()
     if run_mode == "tournament":
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
@@ -797,6 +826,7 @@ if __name__ == "__main__":
         )
 
     template_bot.log_report_summary(forecast_reports)
+    print_publication_report(client)
     print_run_summary_banner(
         forecast_reports,
         will_publish=publish_to_metaculus,

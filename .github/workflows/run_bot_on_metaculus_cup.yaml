@@ -1,9 +1,34 @@
 name: Forecast on Metaculus Cup
 
+# MANUAL ONLY. The cron that used to live here (`0 0 */2 * *`) made this a
+# SECOND scheduled publisher to a scored tournament, running under the same
+# METACULUS_TOKEN as the tournament workflow and in a different concurrency
+# group, so the two could publish simultaneously.
+#
+# It has never actually fired -- GitHub disables scheduled workflows in a fork
+# until they are enabled by hand, and `gh workflow list` reports this one as
+# `disabled_fork` with zero runs ever. That is an accident of the fork, not a
+# control: enabling it in the UI would have started an unattended publisher.
+#
+# Two further reasons it must not run unattended:
+#   * It does not run `backtest/pin_models.py`, so it would use whatever models
+#     forecasting-tools picks by default -- currently a researcher model
+#     OpenRouter no longer serves, which 404s every question.
+#   * It sets skip_previously_forecasted_questions = False (main.py), so every
+#     run re-forecasts every open Cup question.
+#
+# Removing the schedule makes the repository state match the intended
+# operational state instead of relying on a GitHub default.
+# tests/test_production_invariants.py asserts exactly one scheduled workflow
+# can publish to a scored tournament.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 */2 * *" # runs at midnight every 2 days
+
+# Least privilege: this job calls external APIs and never writes to the
+# repository, opens a PR or publishes a package. Without this it inherits
+# the repository-wide default, which is broader than anything here needs.
+permissions:
+  contents: read
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -30,6 +55,20 @@ jobs:
           installer-parallel: true
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
+      # The Metaculus Cup is a SCORED tournament, so this workflow must not
+      # publish through the default model path. Without this step
+      # forecasting-tools assigns the researcher role to
+      # `openai/gpt-4o-search-preview`, which OpenRouter no longer serves, and
+      # every question dies with a 404 -- after the run has already been
+      # dispatched against real questions under the real token.
+      #
+      # One Gemini credential only, matching the tournament workflow. See the
+      # R11 note there.
+      - name: Pin LLM models
+        run: python backtest/pin_models.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       - name: Run bot
         run: |
           poetry run python main.py --mode metaculus_cup
