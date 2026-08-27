@@ -62,9 +62,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      # No dependency installation anywhere in this job. The research lab is
-      # standard library only, which is what makes the "cannot run the
-      # forecaster" guarantee structural instead of a promise.
+      # No forecasting-tools installation anywhere in this job. The research
+      # lab itself is standard library only, which is what makes the "cannot
+      # run the forecaster" guarantee structural instead of a promise.
       - name: Confirm the forecaster cannot run here
         run: |
           if python -c "import forecasting_tools" 2>/dev/null; then
@@ -73,8 +73,121 @@ jobs:
           fi
           echo "forecasting-tools absent, as required"
 
-      - name: Unit tests
-        run: python -m unittest discover -s tests -t . -v
+      # tests/test_publication.py, tests/test_discovery.py and
+      # tests/test_pipeline_hostile_model.py (added in 279ea9d) exercise the
+      # REAL forecasting_tools client via tests/_real_forecasting_tools.py,
+      # so their whole module cannot even be imported here -- that's the
+      # SAME guarantee the step above just checked, working as intended.
+      # Four more individual test methods reach for the real client the same
+      # way. None of that is a regression to paper over: ci.yaml runs the
+      # complete, unfiltered suite (all ~565 tests) with forecasting_tools
+      # genuinely installed, on every push and pull request to main, and
+      # that -- not this job -- is the gate those tests protect.
+      #
+      # requests is an ordinary declared dependency (pyproject.toml), not
+      # part of the forecasting SDK, and installing it grants no ability to
+      # reach Metaculus beyond what MetaculusReadClient already does with
+      # urllib -- so it's safe here and lets the three real network
+      # kill-switch tests run for real instead of being skipped.
+      #
+      # The selection below is an explicit, named exclude list (not a broad
+      # file-pattern skip) so the ~50 other forecasting_tools-independent
+      # checks in test_production_invariants.py and test_adversarial_logging.py
+      # keep running in this job too. A test moving in or out of this set
+      # without the list being updated fails loudly, not silently.
+      - name: Unit tests (offline subset; forecasting_tools stays uninstalled)
+        run: |
+          pip install --quiet "requests>=2.32.3,<3.0.0"
+          python - <<'PYEOF'
+          import sys
+          import unittest
+
+          # Whole modules that import the real forecasting_tools client at
+          # module scope and therefore cannot be collected without it.
+          BLOCKED_MODULES = {
+              "tests.test_discovery",
+              "tests.test_pipeline_hostile_model",
+              "tests.test_publication",
+          }
+          # Individual methods in an otherwise dependency-free module that
+          # reach for the real forecasting_tools client inside the test body.
+          BLOCKED_TESTS = {
+              "tests.test_adversarial_logging.StdoutAndStderrUnderHostileOutputTests."
+              "test_the_publication_report_contains_no_hostile_output",
+              "tests.test_production_invariants.DiscoveryInvariants."
+              "test_the_page_ceiling_is_explicit",
+              "tests.test_production_invariants.PublicationInvariants."
+              "test_the_comment_gets_more_attempts_than_the_sdk_alone",
+              "tests.test_production_invariants.PublicationInvariants."
+              "test_the_orphan_marker_is_a_stable_token",
+              "tests.test_production_invariants.TestHarnessSafetyInvariants."
+              "test_there_is_exactly_one_metaculus_client_class",
+          }
+
+          def real_forecasting_tools_is_loaded():
+              """True only for the genuine package, never the suite's stub.
+
+              Several modules install a bare ModuleType placeholder into
+              sys.modules["forecasting_tools"] so they can run without the
+              package on disk (tests/_real_forecasting_tools.py). The
+              placeholder has no __path__; the real package always does.
+              """
+              module = sys.modules.get("forecasting_tools")
+              return module is not None and hasattr(module, "__path__")
+
+          def flatten(suite):
+              for item in suite:
+                  if isinstance(item, unittest.TestSuite):
+                      yield from flatten(item)
+                  else:
+                      yield item
+
+          loader = unittest.TestLoader()
+          discovered = loader.discover(start_dir="tests", top_level_dir=".")
+
+          kept = unittest.TestSuite()
+          skipped = []
+          for test in flatten(discovered):
+              test_id = test.id()
+              # A module that fails to import becomes a
+              # unittest.loader._FailedTest whose id() is prefixed with
+              # "unittest.loader._FailedTest." (exact form varies by Python
+              # version), so match on suffix/prefix, not equality.
+              blocked_module = any(
+                  test_id == m or test_id.endswith("." + m) or test_id.startswith(m + ".")
+                  for m in BLOCKED_MODULES
+              )
+              if blocked_module or test_id in BLOCKED_TESTS:
+                  skipped.append(test_id)
+                  continue
+              kept.addTest(test)
+
+          print("skipping {0} test(s) that require the real forecasting_tools "
+                "client (covered by ci.yaml with real dependencies "
+                "installed instead):".format(len(skipped)))
+          for test_id in sorted(skipped):
+              print("  - " + test_id)
+          unexpected = len(skipped) - (len(BLOCKED_MODULES) + len(BLOCKED_TESTS))
+          if unexpected:
+              print("::error::skipped {0} more test(s) than the {1} named "
+                    "above expect; the exclude list is stale".format(
+                        len(skipped), len(BLOCKED_MODULES) + len(BLOCKED_TESTS)))
+              sys.exit(1)
+
+          assert not real_forecasting_tools_is_loaded(), (
+              "the REAL forecasting_tools package got imported while "
+              "selecting tests; this job must never import it"
+          )
+
+          result = unittest.TextTestRunner(verbosity=2).run(kept)
+
+          assert not real_forecasting_tools_is_loaded(), (
+              "the REAL forecasting_tools package got imported while "
+              "running tests; this job must never import it"
+          )
+
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PYEOF
 
       # One tiny completion per candidate provider, to find out which of the
       # newly added secrets actually work. Deliberately excluded: OpenRouter
