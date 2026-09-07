@@ -334,12 +334,30 @@ class ScoreSummary:
 
     #: Directional accuracy over binary questions only -- the "% of calls we
     #: got right" reading of accuracy. Reported ALONGSIDE the proper scores,
-    #: never instead of them: it is trivially gameable by answering 99%/1% to
-    #: everything, which improves this number while destroying spot peer. Read
-    #: it with mean_spot_brier, which punishes exactly that.
+    #: never instead of them: confidence cannot move it (a hit is a hit at 51%
+    #: or 99%), but a systematic lean CAN, and the cheapest lean available on
+    #: this platform -- always answer NO -- would raise it while destroying
+    #: spot peer. That is what majority_class_hit_rate below exists to expose.
     n_directional: int = 0
     n_directional_hits: int = 0
     directional_hit_rate: float | None = None
+
+    #: The trivial benchmark: how a forecaster that ignored every question and
+    #: always called the more common outcome would have scored on this exact
+    #: set. directional_hit_rate ABOVE this is evidence of directional skill;
+    #: at or below it, the hit rate is measuring the question mix, not the bot.
+    n_resolved_yes: int = 0
+    n_resolved_no: int = 0
+    majority_class_hit_rate: float | None = None
+    #: directional_hit_rate - majority_class_hit_rate. The honest headline.
+    directional_skill_margin: float | None = None
+
+    #: Where the losses are. A miss at 0.48 is a coin-flip that went the other
+    #: way; a miss at 0.05 is a confident wrong call, which is a different and
+    #: much more expensive defect. Averaged over the mass we put on the outcome
+    #: that actually happened.
+    mean_confidence_when_right: float | None = None
+    mean_confidence_when_wrong: float | None = None
 
     spot_peer_tier: str = UNAVAILABLE
     total_spot_peer: float | None = None
@@ -363,6 +381,12 @@ class ScoreSummary:
             "n_directional": self.n_directional,
             "n_directional_hits": self.n_directional_hits,
             "directional_hit_rate": self.directional_hit_rate,
+            "n_resolved_yes": self.n_resolved_yes,
+            "n_resolved_no": self.n_resolved_no,
+            "majority_class_hit_rate": self.majority_class_hit_rate,
+            "directional_skill_margin": self.directional_skill_margin,
+            "mean_confidence_when_right": self.mean_confidence_when_right,
+            "mean_confidence_when_wrong": self.mean_confidence_when_wrong,
             "spot_peer_tier": self.spot_peer_tier,
             "total_spot_peer": self.total_spot_peer,
             "weighted_total_spot_peer": self.weighted_total_spot_peer,
@@ -425,11 +449,41 @@ def score_track_record(
         [r.spot_brier for r in results if r.spot_brier is not None]
     )
 
-    directional = [r.directional_hit for r in results if r.directional_hit is not None]
-    summary.n_directional = len(directional)
-    summary.n_directional_hits = sum(1 for hit in directional if hit)
-    if directional:
-        summary.directional_hit_rate = summary.n_directional_hits / len(directional)
+    directional_rows = [r for r in results if r.directional_hit is not None]
+    summary.n_directional = len(directional_rows)
+    summary.n_directional_hits = sum(1 for r in directional_rows if r.directional_hit)
+    if directional_rows:
+        summary.directional_hit_rate = (
+            summary.n_directional_hits / len(directional_rows)
+        )
+        # The trivial benchmark. resolved_yes is recoverable per row from the
+        # hit flag and probability_yes: a hit means our mass sat on the outcome
+        # that happened, so yes-resolution is (probability_yes > 0.5) == hit.
+        for row in directional_rows:
+            if row.probability_yes is None:
+                continue
+            leaned_yes = row.probability_yes > DIRECTIONAL_THRESHOLD
+            resolved_yes = leaned_yes if row.directional_hit else not leaned_yes
+            if resolved_yes:
+                summary.n_resolved_yes += 1
+            else:
+                summary.n_resolved_no += 1
+        decided = summary.n_resolved_yes + summary.n_resolved_no
+        if decided:
+            summary.majority_class_hit_rate = (
+                max(summary.n_resolved_yes, summary.n_resolved_no) / decided
+            )
+            summary.directional_skill_margin = (
+                summary.directional_hit_rate - summary.majority_class_hit_rate
+            )
+        summary.mean_confidence_when_right = _mean(
+            [r.probability_of_resolution for r in directional_rows
+             if r.directional_hit and r.probability_of_resolution is not None]
+        )
+        summary.mean_confidence_when_wrong = _mean(
+            [r.probability_of_resolution for r in directional_rows
+             if not r.directional_hit and r.probability_of_resolution is not None]
+        )
 
     exact = [r for r in results if r.spot_peer_tier == EXACT and r.spot_peer is not None]
     if exact and len(exact) == len(results):

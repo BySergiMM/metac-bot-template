@@ -199,6 +199,22 @@ def build_safe_summary(report: dict[str, Any]) -> dict[str, Any]:
             "directional_hit_rate": suppress_small_n(
                 scoring.get("directional_hit_rate"), scoring.get("n_directional")
             ),
+            # The trivial benchmark and the margin over it. Without these the
+            # hit rate is unreadable: 82% is excellent against a 55% base rate
+            # and worthless against an 85% one.
+            "majority_class_hit_rate": suppress_small_n(
+                scoring.get("majority_class_hit_rate"), scoring.get("n_directional")
+            ),
+            "directional_skill_margin": suppress_small_n(
+                scoring.get("directional_skill_margin"), scoring.get("n_directional")
+            ),
+            "mean_confidence_when_right": suppress_small_n(
+                scoring.get("mean_confidence_when_right"), scoring.get("n_directional_hits")
+            ),
+            "mean_confidence_when_wrong": suppress_small_n(
+                scoring.get("mean_confidence_when_wrong"),
+                (scoring.get("n_directional") or 0) - (scoring.get("n_directional_hits") or 0),
+            ),
             "by_question_type": _safe_by_type(scoring.get("by_question_type") or {}),
         },
         "validation": {
@@ -517,10 +533,14 @@ def render_text(safe: dict[str, Any]) -> str:
         ))
     if sc.get("n_directional"):
         rate = sc.get("directional_hit_rate")
+        margin = sc.get("directional_skill_margin")
         add("directional hits (binary)     : {0}/{1}  {2}".format(
             sc.get("n_directional_hits"), sc.get("n_directional"),
             "n/a" if not isinstance(rate, (int, float)) else "{0:.1f}%".format(100 * rate),
         ))
+        add("  vs always-majority          : {0}".format(
+            "n/a" if not isinstance(margin, (int, float))
+            else "{0:+.1f} pts".format(100 * margin)))
     if sc["by_question_type"]:
         add("")
         add("    {0:<16} {1:>5} {2:>9} {3:>16}".format("type", "n", "covered", "mean log score"))
