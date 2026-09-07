@@ -58,17 +58,79 @@ than at the start".
 Same 12 requests per hour, same 5-minute spacing, moved off the `:00`/`:05`
 grid that every other `*/5` and `*/15` cron on the platform also asks for.
 
-**This mitigation is UNVERIFIED.** The baseline above is recorded precisely so
-the change can be falsified: re-measure after several days and revert if the
-distribution has not moved. Do not report it as a fix until it is measured.
+**This mitigation was UNVERIFIED, and has now been falsified.**
+
+## Re-measurement, 2026-09-07
+
+The baseline above was recorded precisely so the change could be tested. It
+was, over the 200 most recent runs (2026-08-23T01:46Z .. 2026-09-07T06:05Z):
+
+| window | gap median | p75 | max | delivery |
+| --- | ---: | ---: | ---: | ---: |
+| 18–23 Aug (`*/5`, the baseline) | 32.2 min | 41.5 | 109.3 | **14%** |
+| 23 Aug – 1 Sep (phase-shifted) | 41.1 min | 60.0 | 741.4 | **5.9%** |
+| since 1 Sep (phase-shifted) | **174.6 min** | 267.6 | 321.5 | **2.6%** |
+
+The distribution moved, in the wrong direction, by roughly 5x. Whether the
+phase shift caused that or merely failed to prevent a platform-wide
+degradation cannot be separated from this data — but either way the phase is
+not the lever, and the honest reading is that cron cannot be tuned into
+working.
+
+The cron is kept as-is: `*/5` is already GitHub's documented ceiling ("the
+shortest interval you can run scheduled workflows is once every 5 minutes"),
+so there is nothing above it to ask for, and reverting the phase would trade
+one unverified guess for another.
+
+The concrete cost, observed: on the night of 2026-09-06/07 MiniBench opened a
+batch of 2 questions at 01:07Z and a batch of 4 at 06:07Z. The gap between the
+two runs was **299 minutes**. The bot caught both batches by luck, not by
+coverage; questions 45518/45519 had already closed by the time it looked again.
+
+## What was changed instead: an internal poll loop
+
+Option 1 from the table below, which this document had already identified as
+the only one that does not require a permission escalation or new
+infrastructure. `run_bot_on_tournament.yaml`'s "Run bot" step now polls for
+`POLL_WINDOW_SECONDS` (3 h) at `POLL_INTERVAL_SECONDS` (5 min) instead of
+running once and exiting.
+
+The schedule is unchanged and still mostly dropped. What changed is what one
+*delivered* event buys: 3 hours of genuine 5-minute detection instead of ~60
+seconds. Since the median gap between delivered events is 2.9 h, runs now hand
+over to one another most of the time.
+
+Sizing is deliberate: the window is about one median gap, not the 6 h job
+ceiling. Enough for near-continuous coverage, without turning a scheduled job
+into a permanently resident process.
+
+Failure semantics, because a loop makes them non-obvious:
+
+* a poll that fails does **not** abort the window — one bad question or one
+  provider blip must not blind the bot for the remaining hours, which would be
+  strictly worse than the single shot this replaced;
+* a window in which **every** poll failed exits non-zero, so a systemic break
+  (dead token, all providers down) still fails the job and still fires the
+  WhatsApp failure notifier.
+
+Both are pinned by tests in `tests/test_production_invariants.py`, along with
+the window fitting inside the step timeout and the timeout staying under
+GitHub's 6 h ceiling.
+
+**Validation, and its limit.** The loop script was extracted from the workflow
+and exercised against a stub bot for all three cases (clean, all-fail,
+intermittent), confirming the exit codes and that the window is respected. It
+has **not** yet been observed across a full 3 h window in CI. Re-measure the
+gap distribution after several days: if delivered events have not changed but
+*coverage* has, the change worked.
 
 ## What would actually give ~5-minute detection
 
-Cron alone cannot, because delivery is upstream. Three options, none adopted:
+Cron alone cannot, because delivery is upstream. Three options:
 
 | option | detection | cost / risk |
 | --- | --- | --- |
-| **Internal poll loop** — one scheduled run per hour that loops internally, sleeping ~5 min between passes | genuine ~5 min, independent of GitHub's scheduler | ~50 runner-min/hour instead of ~1. Free on a public repo, but a large step up in consumption, and a long-lived runner is a new failure mode. Needs validation on `bot-testing-area` first. |
+| **Internal poll loop** — ADOPTED 2026-09-07, see above | genuine ~5 min while a run is alive | Runner minutes are free on a public repo. A long-lived runner is a new failure mode, which is why the failure semantics are pinned by tests. |
 | **Self-re-dispatch** — the run triggers the next one via the API | ~5 min | Requires `actions: write`, i.e. a permission escalation on the one workflow that holds the Metaculus token. Rejected on that basis alone. |
 | **External scheduler** calling `workflow_dispatch` | ~5 min | New infrastructure to run, monitor and secure, holding a GitHub token. Not justified by the size of the problem. |
 

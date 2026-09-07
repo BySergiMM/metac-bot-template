@@ -473,6 +473,73 @@ class WorkflowInvariants(unittest.TestCase):
                     os.environ[key] = value
             sys.modules.pop("backtest.pin_models", None)
 
+    #: The tournament workflow polls inside one run instead of relying on the
+    #: schedule event, because the event is dropped. See docs/cadence.md.
+    TOURNAMENT = (".github", "workflows", "run_bot_on_tournament.yaml")
+
+    def _poll_settings(self) -> dict:
+        text = read(*self.TOURNAMENT)
+        out = {}
+        for key in ("POLL_WINDOW_SECONDS", "POLL_INTERVAL_SECONDS"):
+            match = re.search(key + r':\s*"(\d+)"', text)
+            self.assertIsNotNone(match, key + " is gone from the workflow")
+            out[key] = int(match.group(1))
+        timeout = re.search(r"timeout-minutes:\s*(\d+)", text)
+        self.assertIsNotNone(timeout, "the Run bot step lost its timeout")
+        out["timeout_seconds"] = int(timeout.group(1)) * 60
+        return out
+
+    def test_the_poll_window_fits_inside_the_step_timeout(self):
+        """A window longer than the timeout would be cut off mid-poll every
+        single run, which looks like a flaky bot rather than a misconfigured
+        one."""
+        s = self._poll_settings()
+        self.assertGreater(
+            s["timeout_seconds"], s["POLL_WINDOW_SECONDS"],
+            "the timeout must leave room for the window plus the last poll",
+        )
+
+    def test_the_step_timeout_stays_under_githubs_job_ceiling(self):
+        """GitHub kills a job at 6 hours. A step timeout above that is a
+        promise the platform will not keep."""
+        self.assertLess(self._poll_settings()["timeout_seconds"], 6 * 60 * 60)
+
+    def test_the_poll_interval_is_the_schedule_granularity(self):
+        """5 minutes is the shortest interval GitHub's scheduler accepts, and
+        the whole point of polling is to get that granularity for real."""
+        self.assertEqual(self._poll_settings()["POLL_INTERVAL_SECONDS"], 300)
+
+    def test_a_failed_poll_does_not_abort_the_remaining_window(self):
+        """One bad question or one provider blip must not blind the bot for
+        the rest of the window -- that would be strictly worse than the single
+        shot this replaced."""
+        text = read(*self.TOURNAMENT)
+        self.assertNotIn(
+            "set -euo pipefail", text,
+            "-e would abort the whole window on the first non-zero poll",
+        )
+        self.assertIn("set -uo pipefail", text)
+
+    def test_a_window_where_every_poll_failed_still_fails_the_job(self):
+        """The other half: swallowing every error would leave a systemic
+        break (dead token, dead providers) reported as a green run, and the
+        WhatsApp failure notifier keys off the job result."""
+        text = read(*self.TOURNAMENT)
+        self.assertIn('if [ "${failures}" -eq "${polls}" ]; then', text)
+        self.assertIn("exit 1", text)
+
+    def test_the_loop_still_runs_the_real_bot(self):
+        text = read(*self.TOURNAMENT)
+        self.assertIn("poetry run python main.py", text)
+
+    def test_long_runs_hand_over_rather_than_cancel_each_other(self):
+        """With multi-hour runs, cancel-in-progress would kill a run
+        mid-forecast whenever a new schedule event landed. Queueing instead
+        makes the next run start the moment this one ends, which is the
+        continuous coverage the whole change is for."""
+        text = yaml_without_comments(*self.TOURNAMENT)
+        self.assertIn("cancel-in-progress: false", text)
+
     def test_the_pin_step_and_the_run_step_get_the_same_provider_keys(self):
         """A fallback chain is configured in TWO places and both must agree.
 
