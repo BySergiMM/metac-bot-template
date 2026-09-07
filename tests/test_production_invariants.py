@@ -432,9 +432,18 @@ class WorkflowInvariants(unittest.TestCase):
                 "the quota-circumvention question is unresolved",
             )
 
-    def test_one_credential_generates_the_pre_bucket_block(self):
-        """The mitigation must be a real reduction, not a cosmetic one:
-        with a single credential pin_models must emit no BalancedLlm."""
+    def test_one_credential_generates_no_per_credential_bucket_wiring(self):
+        """The R11 mitigation must be a real reduction, not a cosmetic one.
+
+        Originally phrased as "emits no BalancedLlm". That proxy stopped
+        meaning what it was written to mean once the forecaster ensemble
+        started reusing BalancedLlm to spread the five forecast calls over
+        three DISTINCT MODELS -- a shape that needs one credential per
+        provider, which is exactly what production has. The property R11
+        actually promised is that no SECOND Gemini credential is wired up, so
+        that is what is asserted now: no bucket_backend call, no limiter_key,
+        and no GEMINI2/3/4 anywhere in the generated source.
+        """
         import importlib
         import sys
 
@@ -452,7 +461,10 @@ class WorkflowInvariants(unittest.TestCase):
             pin_models = importlib.import_module("backtest.pin_models")
             self.assertFalse(pin_models.BALANCED)
             generated = pin_models.patch(read("main.py"), pin_models.DEFAULTS)
-            self.assertNotIn("BalancedLlm(", generated)
+            self.assertNotIn("bucket_backend(", generated)
+            self.assertNotIn("limiter_key", generated)
+            for extra in ("GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY"):
+                self.assertNotIn(extra, generated)
             self.assertIn("FallbackLlm([", generated)
         finally:
             for key, value in saved.items():

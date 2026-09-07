@@ -14,6 +14,28 @@ fourth link served 0 of 1020 calls and the run took exactly as long as with
 one. Extra quota is only reachable by choosing a chain at ADMISSION time,
 which is what this class does.
 
+Second use: model diversity for the forecaster
+----------------------------------------------
+backtest/pin_models.py also uses this class for a different purpose. The
+"default" role is invoked predictions_per_research_report times per question
+and the answers are aggregated, so it builds one chain PER PRIMARY MODEL and
+lets the same admission-time choice spread those calls over distinct models
+instead of five correlated samples of one. FutureSearch publishes the finding
+("Run agents twice for fun and profit", 2026-05-01): ensembling across
+different models cuts Brier score, not just repeating one model.
+
+The two uses differ in what "equivalent" means, and it is worth being precise,
+because the word appears throughout this file:
+
+  buckets    same model, different credential -> interchangeable in OUTPUT too
+  ensemble   different model, one credential  -> interchangeable in VALIDITY
+             only; every chain returns a usable answer, deliberately not the
+             same one
+
+Everything below holds for both. The class never sees a forecast, cannot retry
+one, and returns exactly one string per call either way -- so "which chain" is
+a routing decision, never a scoring one.
+
 What it deliberately does NOT change
 ------------------------------------
 Each chain keeps the production order OpenRouter -> Gemini -> Groq, untouched.
@@ -87,7 +109,12 @@ def bucket_backend(
 
 
 class BalancedLlm(GeneralLlm):
-    """Route each call to the least-loaded of several equivalent chains."""
+    """Route each call to the least-loaded of several interchangeable chains.
+
+    Interchangeable in the sense that any of them can serve the call. They are
+    identical in output for the bucket use and deliberately different for the
+    ensemble use -- see the module docstring.
+    """
 
     def __init__(self, chains: list[GeneralLlm], bucket_keys: list[str]) -> None:
         if not chains:
