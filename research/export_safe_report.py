@@ -169,7 +169,28 @@ def build_safe_summary(report: dict[str, Any]) -> dict[str, Any]:
             "mean_spot_peer": suppress_small_n(
                 scoring.get("mean_spot_peer"), scoring.get("n_scored")
             ),
-            "missing_inputs": scoring.get("missing_inputs") or {},
+            # A COUNT per missing input, never a probability. Emitted as a
+            # list of records rather than the natural {name: count} dict
+            # because assert_safe() rejects BANNED_KEYS by key NAME wherever
+            # they nest, and one of these names is legitimately
+            # "probability_of_resolution" -- so the dict form aborted the whole
+            # export the moment any question became unscoreable, which is the
+            # normal case. The guard stays exactly as strict; the diagnostic
+            # stops pretending to be a field name.
+            "missing_inputs": [
+                {"input": name, "n_questions": count}
+                for name, count in sorted((scoring.get("missing_inputs") or {}).items())
+            ],
+            # Directional accuracy, binary only. Aggregate counts, so no
+            # per-question resolution is recoverable from them -- with n >= 3
+            # a hit rate constrains no individual question's outcome.
+            "n_directional": scoring.get("n_directional"),
+            "n_directional_hits": suppress_small_n(
+                scoring.get("n_directional_hits"), scoring.get("n_directional")
+            ),
+            "directional_hit_rate": suppress_small_n(
+                scoring.get("directional_hit_rate"), scoring.get("n_directional")
+            ),
             "by_question_type": _safe_by_type(scoring.get("by_question_type") or {}),
         },
         "validation": {
@@ -412,7 +433,18 @@ def render_text(safe: dict[str, Any]) -> str:
         add("weighted total spot peer      : {0}".format(fmt(sc["weighted_total_spot_peer"], ".2f")))
         add("mean spot peer                : {0}".format(fmt(sc["mean_spot_peer"], ".2f")))
     if sc["missing_inputs"]:
-        add("missing inputs                : {0}".format(json.dumps(sc["missing_inputs"])))
+        add("missing inputs                : {0}".format(
+            ", ".join(
+                "{0} x{1}".format(item["input"], item["n_questions"])
+                for item in sc["missing_inputs"]
+            )
+        ))
+    if sc.get("n_directional"):
+        rate = sc.get("directional_hit_rate")
+        add("directional hits (binary)     : {0}/{1}  {2}".format(
+            sc.get("n_directional_hits"), sc.get("n_directional"),
+            "n/a" if not isinstance(rate, (int, float)) else "{0:.1f}%".format(100 * rate),
+        ))
     if sc["by_question_type"]:
         add("")
         add("    {0:<16} {1:>5} {2:>9} {3:>16}".format("type", "n", "covered", "mean log score"))

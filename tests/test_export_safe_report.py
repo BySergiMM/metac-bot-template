@@ -187,6 +187,55 @@ class MissingDataTests(unittest.TestCase):
         self.assertEqual(safe["account"]["has_bot_benchmarking_tier"], "probe_failed")
         self.assertNotIn("secret-ish", json.dumps(safe))
 
+    def test_a_missing_input_named_like_a_banned_key_does_not_abort_the_export(self):
+        """Regression: the exporter used to die on its own diagnostics.
+
+        `missing_inputs` counts HOW MANY questions lacked each scoring input,
+        and one of those inputs is legitimately called
+        "probability_of_resolution". Emitted as a dict its NAME became a key,
+        and assert_safe() rejects banned key names wherever they nest -- so
+        the whole publishable artifact failed to build the moment any question
+        became unscoreable, which is the normal case (33 of 57 on
+        2026-09-07). The guard is unchanged; the diagnostic is now a list of
+        records, so the name is a value.
+        """
+        safe = build_safe_summary(
+            {"scoring": {"missing_inputs": {"probability_of_resolution": 33,
+                                            "geometric_mean_of_other_forecasters": 24},
+                         "n_scored": 57}}
+        )
+        assert_safe(safe)  # must not raise
+        text = render_text(safe)
+        # The diagnostic still has to be readable, or suppressing it would
+        # "fix" the crash by deleting the information.
+        self.assertIn("probability_of_resolution", text)
+        self.assertIn("33", text)
+
+    def test_the_banned_key_guard_itself_is_unchanged(self):
+        """The fix above must not have been a relaxation of the guard: a real
+        per-question probability keyed by that name must still abort."""
+        with self.assertRaises(Exception):
+            assert_safe({"per_question": {"probability_of_resolution": 0.93}})
+
+    def test_directional_hit_rate_is_suppressed_below_the_small_n_floor(self):
+        """An accuracy rate over one or two questions would constrain those
+        questions' outcomes, which is a resolution leak by arithmetic."""
+        safe = build_safe_summary(
+            {"scoring": {"n_directional": 2, "n_directional_hits": 2,
+                         "directional_hit_rate": 1.0}}
+        )
+        assert_safe(safe)
+        self.assertNotIsInstance(safe["offline_scoring"]["directional_hit_rate"], float)
+
+    def test_directional_hit_rate_survives_above_the_floor(self):
+        safe = build_safe_summary(
+            {"scoring": {"n_directional": 22, "n_directional_hits": 15,
+                         "directional_hit_rate": 15 / 22.0}}
+        )
+        assert_safe(safe)
+        self.assertAlmostEqual(safe["offline_scoring"]["directional_hit_rate"], 15 / 22.0)
+        self.assertIn("15/22", render_text(safe))
+
     def test_unknown_probe_shape_is_not_echoed_verbatim(self):
         safe = build_safe_summary(
             {"dataset": {"account": {"data_access_status": {"weird_field": "verbatim-payload"}}}}

@@ -26,6 +26,7 @@ from research.scorer import (
     EXACT,
     UNAVAILABLE,
     brier_score,
+    is_directional_hit,
     implied_geometric_mean,
     log_score,
     peer_factor,
@@ -168,6 +169,71 @@ class SpotPeerTests(unittest.TestCase):
         )
         self.assertEqual(result.spot_peer, 0.0)
         self.assertEqual(result.spot_peer_tier, EXACT)
+
+
+class DirectionalAccuracyTests(unittest.TestCase):
+    """The "% of calls we got right" reading of accuracy.
+
+    Added because a target was set on this number and it was not being
+    measured at all. It lives NEXT TO the proper scores, never instead of
+    them: see test_it_is_gameable_in_a_way_brier_catches for why.
+    """
+
+    def test_more_than_half_the_mass_on_the_realised_outcome_is_a_hit(self):
+        self.assertIs(is_directional_hit(0.51), True)
+        self.assertIs(is_directional_hit(0.99), True)
+
+    def test_less_than_half_is_a_miss(self):
+        self.assertIs(is_directional_hit(0.49), False)
+        self.assertIs(is_directional_hit(0.01), False)
+
+    def test_exactly_half_is_not_a_hit(self):
+        """A coin flip expresses no direction. Counting it as correct would
+        let a bot that answers 50% to everything report 100% accuracy."""
+        self.assertIs(is_directional_hit(0.5), False)
+
+    def test_no_forecast_is_neither_hit_nor_miss(self):
+        """None, not False: folding a coverage failure into the accuracy
+        number would mix the two things this lab keeps apart."""
+        self.assertIsNone(is_directional_hit(None))
+
+    def test_a_binary_question_gets_a_verdict(self):
+        result = score_question(
+            _question(),
+            _forecasts(fixtures.forecast_row(1, 0.8, probability_yes=0.8)),
+            geometric_means=_forecasts(fixtures.geometric_mean_row(1, 0.5, 11)),
+        )
+        self.assertIs(result.directional_hit, True)
+
+    def test_a_non_binary_question_gets_none(self):
+        """probability_of_resolution > 0.5 only means "the side we leaned on"
+        when there are two outcomes. With k > 2 the modal option can hold well
+        under half the mass, so the same test would score a correct call as a
+        miss."""
+        result = score_question(
+            _question(question_type="numeric"),
+            _forecasts(fixtures.forecast_row(1, 0.8, probability_yes=0.8)),
+            geometric_means=_forecasts(fixtures.geometric_mean_row(1, 0.5, 11)),
+        )
+        self.assertIsNone(result.directional_hit)
+
+    def test_it_is_gameable_in_a_way_brier_catches(self):
+        """The reason this metric is never reported alone.
+
+        A forecaster that always says 99% on the side it leans scores a
+        PERFECT hit rate on the questions it calls right, and its Brier is
+        excellent there too -- but one wrong call at 99% costs ~0.96 of Brier,
+        far more than the 0.25 a 50% answer would have cost. Accuracy cannot
+        see that trade; Brier can, which is why both are printed together.
+        """
+        confident_and_right = brier_score(0.99, True)
+        confident_and_wrong = brier_score(0.99, False)
+        humble = brier_score(0.5, False)
+        self.assertIs(is_directional_hit(0.99), True)
+        self.assertLess(confident_and_right, humble)
+        self.assertGreater(confident_and_wrong, humble)
+        # One overconfident miss outweighs three overconfident hits.
+        self.assertGreater(confident_and_wrong, 3 * (humble - confident_and_right))
 
 
 class MissingDataTests(unittest.TestCase):

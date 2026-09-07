@@ -106,6 +106,11 @@ def render(report: dict[str, Any]) -> str:
     add("coverage rate                 : {0}".format(_pct(scoring["coverage_rate"])))
     add("mean spot log score  [EXACT]  : {0}".format(_fmt(scoring["mean_spot_log_score"])))
     add("mean spot Brier (binary only) : {0}".format(_fmt(scoring["mean_spot_brier"])))
+    add("directional hits (binary only) : {0}/{1}  {2}".format(
+        scoring.get("n_directional_hits", 0),
+        scoring.get("n_directional", 0),
+        _pct(scoring.get("directional_hit_rate")),
+    ))
     add("spot peer tier                : {0}".format(scoring["spot_peer_tier"]))
     if scoring["spot_peer_tier"] == EXACT:
         add("total spot peer               : {0}".format(_fmt(scoring["total_spot_peer"], ".2f")))

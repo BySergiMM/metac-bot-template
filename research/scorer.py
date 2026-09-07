@@ -100,6 +100,31 @@ def brier_score(probability_yes: float | None, resolved_yes: bool | None) -> flo
     return (probability_yes - outcome) ** 2
 
 
+#: A forecast counts as directionally correct when it put MORE than half its
+#: mass on the outcome that actually happened. Deliberately restricted to
+#: binary questions: `probability_of_resolution` is the mass on the realised
+#: outcome, and only for a two-outcome question does "> 0.5" mean "this is the
+#: side we leaned on". With k > 2 options the modal choice can hold well under
+#: half the mass, so the same test would report a correct call as a miss.
+#:
+#: Exactly 0.5 is NOT a hit. A coin-flip forecast expresses no direction, and
+#: counting it as correct would let a bot that answers 50% to everything report
+#: a 100% hit rate.
+DIRECTIONAL_THRESHOLD = 0.5
+
+
+def is_directional_hit(probability_of_resolution: float | None) -> bool | None:
+    """True / False / None (not applicable or not measurable).
+
+    None is a third state on purpose: folding "no forecast" into False would
+    silently mix a coverage failure into an accuracy number, which are the two
+    things this lab exists to keep apart.
+    """
+    if probability_of_resolution is None:
+        return None
+    return probability_of_resolution > DIRECTIONAL_THRESHOLD
+
+
 @dataclass
 class SpotScore:
     """Our reconstruction for one question."""
@@ -118,6 +143,9 @@ class SpotScore:
     # scores we can always compute
     spot_log_score: float | None = None
     spot_brier: float | None = None
+    #: True/False for a scored binary question, None where the notion does not
+    #: apply (non-binary, unresolved, or no forecast at the spot instant).
+    directional_hit: bool | None = None
 
     # the competition metric
     spot_peer: float | None = None
@@ -229,6 +257,7 @@ def score_question(
     if question.question_type == "binary":
         resolved_yes = (question.resolution or "").strip().lower() == "yes"
         result.spot_brier = brier_score(forecast.probability_yes, resolved_yes)
+        result.directional_hit = is_directional_hit(p)
 
     gm_row = select_geometric_mean_at_spot(geometric_means or [], spot_ts)
     if gm_row is None or gm_row.probability_of_resolution is None:
@@ -303,6 +332,15 @@ class ScoreSummary:
     mean_spot_brier: float | None = None
     coverage_rate: float | None = None
 
+    #: Directional accuracy over binary questions only -- the "% of calls we
+    #: got right" reading of accuracy. Reported ALONGSIDE the proper scores,
+    #: never instead of them: it is trivially gameable by answering 99%/1% to
+    #: everything, which improves this number while destroying spot peer. Read
+    #: it with mean_spot_brier, which punishes exactly that.
+    n_directional: int = 0
+    n_directional_hits: int = 0
+    directional_hit_rate: float | None = None
+
     spot_peer_tier: str = UNAVAILABLE
     total_spot_peer: float | None = None
     weighted_total_spot_peer: float | None = None
@@ -322,6 +360,9 @@ class ScoreSummary:
             "mean_spot_log_score": self.mean_spot_log_score,
             "mean_spot_brier": self.mean_spot_brier,
             "coverage_rate": self.coverage_rate,
+            "n_directional": self.n_directional,
+            "n_directional_hits": self.n_directional_hits,
+            "directional_hit_rate": self.directional_hit_rate,
             "spot_peer_tier": self.spot_peer_tier,
             "total_spot_peer": self.total_spot_peer,
             "weighted_total_spot_peer": self.weighted_total_spot_peer,
@@ -383,6 +424,12 @@ def score_track_record(
     summary.mean_spot_brier = _mean(
         [r.spot_brier for r in results if r.spot_brier is not None]
     )
+
+    directional = [r.directional_hit for r in results if r.directional_hit is not None]
+    summary.n_directional = len(directional)
+    summary.n_directional_hits = sum(1 for hit in directional if hit)
+    if directional:
+        summary.directional_hit_rate = summary.n_directional_hits / len(directional)
 
     exact = [r for r in results if r.spot_peer_tier == EXACT and r.spot_peer is not None]
     if exact and len(exact) == len(results):
