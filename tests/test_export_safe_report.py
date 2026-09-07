@@ -16,6 +16,7 @@ from research.analyze_track_record import analyze
 from research.export_safe_report import (
     UnsafeReportError,
     assert_safe,
+    RAW_CONTENT_TOKENS,
     build_safe_summary,
     render_text,
 )
@@ -251,6 +252,73 @@ class MissingDataTests(unittest.TestCase):
         assert_safe(safe)
         self.assertAlmostEqual(safe["offline_scoring"]["directional_hit_rate"], 15 / 22.0)
         self.assertIn("15/22", render_text(safe))
+
+    def test_the_whole_real_report_shape_passes_both_publication_guards(self):
+        """The shape run 34109534444 actually produced.
+
+        Three separate places carried the same raw scoring-input names --
+        scoring.missing_inputs, validation.spot_peer.missing_terms and
+        benchmark_coverage.discard_reasons -- and fixing them one at a time
+        cost one CI run each. This pins all three at once, with the real
+        nesting, so the next one fails locally.
+        """
+        report = {
+            "scoring": {
+                "missing_inputs": {"probability_of_resolution": 33,
+                                   "geometric_mean_of_other_forecasters": 24},
+                "n_scored": 57, "n_directional": 22, "n_directional_hits": 18,
+                "directional_hit_rate": 18 / 22.0, "mean_spot_brier": 0.1853,
+            },
+            "validation": {"spot_peer": {
+                "status": "UNAVAILABLE",
+                "blocked_reason": "no geometric-mean aggregate rows",
+                "missing_terms": ["geometric_mean_of_other_forecasters",
+                                  "probability_of_resolution"],
+            }},
+            "benchmark_coverage": {"discard_reasons": {
+                "unresolved_or_annulled": 13, "no_probability_of_resolution": 33,
+            }},
+        }
+        safe = build_safe_summary(report)
+        assert_safe(safe)
+        blob = json.dumps(safe) + render_text(safe)
+        for token in RAW_CONTENT_TOKENS:
+            self.assertNotIn(token, blob.lower(), token)
+        # ...and the information survived the translation, in all three places.
+        text = render_text(safe)
+        self.assertIn("outcome_probability_absent x33", text)
+        self.assertIn("crowd_aggregate_absent", text)
+        self.assertIn("unresolved_or_annulled x13", text)
+
+    def test_the_python_guard_greps_for_what_the_workflow_greps_for(self):
+        """RAW_CONTENT_TOKENS transcribes the workflow's publication guard.
+
+        If the two drift apart the Python side stops being a local reproduction
+        of the CI failure, which is the entire reason it exists.
+        """
+        workflow = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            ".github", "workflows", "research_track_record.yaml",
+        )
+        with open(workflow) as handle:
+            src = handle.read()
+        line = [ln for ln in src.splitlines()
+                if "grep -qiE" in ln and "not uploading" not in ln]
+        self.assertTrue(line, "the publication guard's grep line is gone")
+        pattern = line[0]
+        for token in RAW_CONTENT_TOKENS:
+            self.assertIn(
+                token.replace(".", "\\."), pattern,
+                "{0!r} is not in the workflow's guard".format(token),
+            )
+
+    def test_a_raw_content_token_in_a_string_value_is_refused(self):
+        """Key names were already covered; a field name echoed as DATA is
+        still a field name in a world-readable file."""
+        with self.assertRaises(Exception):
+            assert_safe({"note": "see probability_of_resolution for detail"})
+        with self.assertRaises(Exception):
+            assert_safe({"note": "https://www.metaculus.com/questions/45518"})
 
     def test_unknown_probe_shape_is_not_echoed_verbatim(self):
         safe = build_safe_summary(
