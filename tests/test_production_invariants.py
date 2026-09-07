@@ -473,6 +473,60 @@ class WorkflowInvariants(unittest.TestCase):
                     os.environ[key] = value
             sys.modules.pop("backtest.pin_models", None)
 
+    def test_the_pin_step_and_the_run_step_get_the_same_provider_keys(self):
+        """A fallback chain is configured in TWO places and both must agree.
+
+        pin_models reads os.environ at PATCH time to decide which backends to
+        write into the generated llms= block; litellm reads it again at RUN
+        time to authenticate them. Give the keys to only one step and the
+        failure is silent in both directions:
+
+          pin only -> the block names Gemini and Groq, litellm has no
+                      credential for either, and every fallback leg dies. This
+                      was live on run_bot_on_metaculus_cup.yaml, which
+                      publishes to a SCORED tournament.
+          run only -> pin_models sees no keys, emits a single GeneralLlm per
+                      role, and the chain silently does not exist at all. This
+                      was live on test_bot.yaml, the pre-flight smoke test,
+                      so the check that is supposed to catch problems before a
+                      real run was testing a configuration production never
+                      uses.
+
+        Asserted per workflow that runs main.py, over the provider keys that
+        actually gate the chain.
+        """
+        chain_keys = ("GEMINI_API_KEY", "GROQ_API_KEY")
+        workflow_dir = os.path.join(ROOT, ".github", "workflows")
+        checked = 0
+        for name in sorted(os.listdir(workflow_dir)):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            text = yaml_without_comments(".github", "workflows", name)
+            # Must EXECUTE main.py, not merely mention it: ci.yaml names the
+            # file in a test command without ever running the bot.
+            if "python main.py" not in text:
+                continue
+            # research_fallback_e2e runs main.py with OpenRouter deliberately
+            # absent; it is an experiment about a missing key, not production.
+            if name.startswith("research_"):
+                continue
+            steps = text.split("- name:")
+            pin = [b for b in steps if "pin_models.py" in b]
+            run = [b for b in steps if "python main.py" in b]
+            self.assertTrue(pin, "{0}: no pin_models step".format(name))
+            self.assertTrue(run, "{0}: no main.py step".format(name))
+            for key in chain_keys:
+                for label, blocks in (("pin", pin), ("run", run)):
+                    self.assertTrue(
+                        any(key in b for b in blocks),
+                        "{0}: {1} step is missing {2}; the fallback chain "
+                        "would be half-configured".format(name, label, key),
+                    )
+            checked += 1
+        self.assertGreaterEqual(
+            checked, 3, "expected tournament, cup and test_bot to be covered"
+        )
+
     def test_every_workflow_that_can_publish_to_a_scored_tournament_pins_models(self):
         """Without pin_models, forecasting-tools assigns the researcher role to
         a model OpenRouter no longer serves and every question 404s -- after

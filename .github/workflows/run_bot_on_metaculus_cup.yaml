@@ -83,3 +83,11 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # These reached the Pin step but NOT this one, so pin_models wrote a
+          # chain naming Gemini and Groq and litellm then had no credential for
+          # either: a fallback ladder that looks present in the generated
+          # source and is dead at runtime. On a SCORED tournament. Both steps
+          # need the same set -- see the invariant in
+          # tests/test_production_invariants.py.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
