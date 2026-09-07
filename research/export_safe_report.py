@@ -169,18 +169,26 @@ def build_safe_summary(report: dict[str, Any]) -> dict[str, Any]:
             "mean_spot_peer": suppress_small_n(
                 scoring.get("mean_spot_peer"), scoring.get("n_scored")
             ),
-            # A COUNT per missing input, never a probability. Emitted as a
-            # list of records rather than the natural {name: count} dict
-            # because assert_safe() rejects BANNED_KEYS by key NAME wherever
-            # they nest, and one of these names is legitimately
-            # "probability_of_resolution" -- so the dict form aborted the whole
-            # export the moment any question became unscoreable, which is the
-            # normal case. The guard stays exactly as strict; the diagnostic
-            # stops pretending to be a field name.
-            "missing_inputs": [
-                {"input": name, "n_questions": count}
-                for name, count in sorted((scoring.get("missing_inputs") or {}).items())
-            ],
+            # Why questions could not be scored, as COUNTS under a CLOSED
+            # VOCABULARY of reason codes -- never the raw input names.
+            #
+            # Two independent guards refuse the literal token
+            # "probability_of_resolution" in a published artifact:
+            # assert_safe() below rejects it as a key name, and the workflow's
+            # "Refuse to publish raw data" step greps the finished file for
+            # it. Both are right to: that token names the field carrying our
+            # probability on the outcome that happened, which is a resolution
+            # leak. This diagnostic is only a COUNT of questions missing that
+            # field, so it is not the protected thing -- but rather than
+            # rename a field to slip past a grep, the artifact simply stops
+            # carrying provider-side field names at all.
+            #
+            # Mapping through _REASON_CODES is what makes that structural: an
+            # input this map does not know becomes "other", so a new scoring
+            # input added upstream can never introduce a new raw name into a
+            # world-readable file. The full breakdown stays in the CI log and
+            # in full_report.json, which never leaves RUNNER_TEMP.
+            "unscoreable_counts": _safe_reason_counts(scoring.get("missing_inputs")),
             # Directional accuracy, binary only. Aggregate counts, so no
             # per-question resolution is recoverable from them -- with n >= 3
             # a hit rate constrains no individual question's outcome.
@@ -308,6 +316,36 @@ def suppress_small_n(value: Any, n: Any, minimum: int = MIN_CELL) -> Any:
     return value
 
 
+#: Closed vocabulary for unscoreable-question reasons. Keys are the scoring
+#: input names produced by research/scorer.py; values are the only strings that
+#: may reach a published artifact. Anything unmapped becomes "other".
+_REASON_CODES = {
+    "probability_of_resolution": "outcome_probability_absent",
+    "geometric_mean_of_other_forecasters": "crowd_aggregate_absent",
+    "spot_scoring_time": "spot_instant_underivable",
+    "resolution": "unresolved",
+}
+
+
+def _safe_reason_counts(missing: Any) -> list[dict[str, Any]]:
+    """{input_name: count} -> [{reason_code, n_questions}], sorted, vocabulary
+    closed. Counts are aggregates over the whole dataset and constrain no
+    individual question, so they are not suppressed by n."""
+    if not isinstance(missing, dict):
+        return []
+    totals: dict[str, int] = {}
+    for name, count in missing.items():
+        code = _REASON_CODES.get(str(name), "other")
+        try:
+            totals[code] = totals.get(code, 0) + int(count)
+        except (TypeError, ValueError):
+            continue
+    return [
+        {"reason_code": code, "n_questions": total}
+        for code, total in sorted(totals.items())
+    ]
+
+
 def _safe_by_type(by_type: dict[str, Any]) -> dict[str, Any]:
     return {
         qtype: {
@@ -432,11 +470,11 @@ def render_text(safe: dict[str, Any]) -> str:
         add("total spot peer               : {0}".format(fmt(sc["total_spot_peer"], ".2f")))
         add("weighted total spot peer      : {0}".format(fmt(sc["weighted_total_spot_peer"], ".2f")))
         add("mean spot peer                : {0}".format(fmt(sc["mean_spot_peer"], ".2f")))
-    if sc["missing_inputs"]:
-        add("missing inputs                : {0}".format(
+    if sc["unscoreable_counts"]:
+        add("unscoreable questions         : {0}".format(
             ", ".join(
-                "{0} x{1}".format(item["input"], item["n_questions"])
-                for item in sc["missing_inputs"]
+                "{0} x{1}".format(item["reason_code"], item["n_questions"])
+                for item in sc["unscoreable_counts"]
             )
         ))
     if sc.get("n_directional"):

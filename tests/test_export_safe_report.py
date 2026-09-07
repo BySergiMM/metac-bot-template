@@ -206,10 +206,26 @@ class MissingDataTests(unittest.TestCase):
         )
         assert_safe(safe)  # must not raise
         text = render_text(safe)
-        # The diagnostic still has to be readable, or suppressing it would
-        # "fix" the crash by deleting the information.
-        self.assertIn("probability_of_resolution", text)
+        blob = json.dumps(safe) + text
+        # The count survives, under a reason code from the closed vocabulary.
+        self.assertIn("outcome_probability_absent", text)
         self.assertIn("33", text)
+        # And the provider-side field name reaches neither the JSON nor the
+        # text: the workflow's "Refuse to publish raw data" step greps the
+        # finished artifact for exactly this token.
+        self.assertNotIn("probability_of_resolution", blob)
+
+    def test_an_unknown_missing_input_cannot_introduce_a_raw_name(self):
+        """The vocabulary is closed on purpose: a scoring input added upstream
+        must not be able to put a new provider-side name into a world-readable
+        file just by existing."""
+        safe = build_safe_summary(
+            {"scoring": {"missing_inputs": {"some_new_internal_field": 4}}}
+        )
+        assert_safe(safe)
+        blob = json.dumps(safe) + render_text(safe)
+        self.assertNotIn("some_new_internal_field", blob)
+        self.assertIn("other", json.dumps(safe["offline_scoring"]["unscoreable_counts"]))
 
     def test_the_banned_key_guard_itself_is_unchanged(self):
         """The fix above must not have been a relaxation of the guard: a real
