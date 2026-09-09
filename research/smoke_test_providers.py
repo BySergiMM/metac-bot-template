@@ -400,9 +400,62 @@ def probe_structured(route: dict) -> dict:
     return out
 
 
+#: Catalogue entries that are not chat models, so probing them for
+#: schema-constrained JSON is a guaranteed, meaningless failure.
+_NON_CHAT_HINTS = (
+    "whisper", "tts", "embed", "embedding", "guard", "moderation",
+    "vision-preview", "rerank", "distil-whisper", "playai",
+)
+
+#: Cap on models probed per provider. A sweep is a research action against a
+#: free tier: bounded so it cannot consume a day's quota by itself.
+_SWEEP_CAP = 25
+
+
+def _sweep_candidates(catalogue: dict) -> list[str]:
+    ids = catalogue.get("models") or []
+    keep = [
+        model_id for model_id in ids
+        if not any(hint in model_id.lower() for hint in _NON_CHAT_HINTS)
+    ]
+    return keep[:_SWEEP_CAP]
+
+
+def sweep_structured(route: dict, catalogue: dict) -> list[dict]:
+    """Probe EVERY chat model this provider serves for schema-constrained JSON.
+
+    Why a sweep and not a guess: the parser chain currently has effective depth
+    one. `openrouter/openai/gpt-4o-mini` returns 402 with no credits, and
+    `gemini-3.5-flash-lite` is the only backend in STRUCTURED_OUTPUT_CAPABLE,
+    on a single 15 RPM credential. When Gemini rate-limits, the parser has
+    nowhere to go and the prediction is discarded outright -- which cost five
+    questions on 2026-09-08 (runs 34176403744 and 34193820860).
+
+    Groq was excluded from the parser chain on ONE measurement, of ONE model
+    (`openai/gpt-oss-120b`, json_validate_failed). That is evidence about that
+    model, not about the provider. This asks the provider what it serves and
+    tests each one, so the exclusion is re-decided on data rather than
+    inherited.
+    """
+    out = []
+    prefix = route["litellm_model"].split("/", 1)[0]
+    for model_id in _sweep_candidates(catalogue):
+        probe_route = dict(route)
+        probe_route["litellm_model"] = "{0}/{1}".format(prefix, model_id)
+        result = probe_structured(probe_route)
+        result["swept_model"] = model_id
+        out.append(result)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--litellm", action="store_true")
+    parser.add_argument(
+        "--structured-sweep", action="store_true",
+        help="probe every chat model each provider serves for schema-constrained "
+             "JSON, not just the one pinned in ROUTES",
+    )
     args = parser.parse_args()
 
     print("Excluded on purpose: OpenRouter (known good, would burn free quota), "
@@ -429,6 +482,16 @@ def main() -> int:
                 structured = probe_structured(route)
                 results.append(structured)
                 print(json.dumps(structured, indent=2, sort_keys=True))
+        if args.structured_sweep and catalogue.get("result") == "OK":
+            swept = sweep_structured(route, catalogue)
+            results.extend(swept)
+            passing = [r["swept_model"] for r in swept if r.get("result") == "OK"]
+            print("STRUCTURED SWEEP {0}: {1}/{2} models emit schema-constrained JSON".format(
+                route["label"], len(passing), len(swept)))
+            for r in swept:
+                print("   {0:<44} {1:<6} {2}".format(
+                    r.get("swept_model", "?")[:43], r.get("result", "?"),
+                    r.get("error_class") or ""))
         print("-" * 70)
 
     print("=" * 70)
