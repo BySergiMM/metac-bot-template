@@ -210,7 +210,15 @@ jobs:
           ALIBABA_API_KEY: ${{ secrets.ALIBABA_API_KEY }}
         run: |
           pip install --quiet "litellm==1.80.10"
-          python research/smoke_test_providers.py --litellm
+          # --structured-sweep asks each provider what it serves and tests
+          # EVERY chat model for schema-constrained JSON, rather than only the
+          # one pinned in ROUTES. The parser chain has effective depth one --
+          # Gemini alone, on a single 15 RPM credential, since OpenRouter ran
+          # out of credits -- and that cost five questions outright on
+          # 2026-09-08. Groq was excluded from the parser chain on ONE
+          # measurement of ONE model, which is evidence about that model, not
+          # about the provider.
+          python research/smoke_test_providers.py --litellm --structured-sweep
 
       # Determines whether the four Gemini credentials draw on separate quota
       # buckets. A single call per key would only prove validity: the quota is
