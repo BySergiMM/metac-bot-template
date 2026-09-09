@@ -113,6 +113,20 @@ DEFAULT_LIMITS: dict[str, ProviderLimits] = {
         requests_per_minute=None,          # Groq metered us on tokens, not requests
         tokens_per_minute=8000.0,          # measured: "TPM: Limit 8000"
     ),
+    # Parser fallback, added after a catalogue sweep found it is the one Groq
+    # model that emits schema-constrained JSON (run 34409492553).
+    #
+    # The 8000 TPM here is INHERITED from gpt-oss-120b above, not measured for
+    # this model: Groq meters per model, so the real ceiling may differ. It is
+    # registered rather than left out because limits_for() hands an unknown key
+    # an UNTHROTTLED limiter -- a missing entry would look controlled and
+    # enforce nothing. Inheriting a measured-conservative number errs toward
+    # waiting, which for the parser costs latency; the alternative errs toward
+    # 429s, which costs the prediction. Re-measure if Groq starts 429ing here.
+    "groq/qwen/qwen3.8-27b": ProviderLimits(
+        requests_per_minute=None,
+        tokens_per_minute=8000.0,
+    ),
     # OpenRouter's observed cap is per DAY (50), never per minute: 63 logs and
     # not one per-minute error. Left unlimited so the current production path
     # is unchanged - the point of this module is to stop bursts against

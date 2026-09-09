@@ -134,13 +134,57 @@ FALLBACK_CHAIN = [
 # raises when two samples disagree, so a backend that answers in prose turns a
 # survived outage into a discarded prediction.
 #
-# Measured, not assumed (same smoke-test run):
+# Measured, not assumed (smoke-test run 32293364075):
 #   gemini/gemini-3.5-flash-lite  returned {"probability": 0.42}          OK
 #   groq/openai/gpt-oss-120b      json_validate_failed, failed_generation="" 
-# So Groq stays in the reasoning chain, where prose is exactly what we want,
-# and is excluded from the parser chain. A reasoning role that falls all the
-# way to Groq still gets parsed by OpenRouter or Gemini.
-STRUCTURED_OUTPUT_CAPABLE = {"gemini/gemini-3.5-flash-lite"}
+#
+# That second line was read for a month as "Groq cannot emit structured
+# output". It says no such thing -- it is one model. A full sweep of Groq's
+# catalogue (run 34409492553) found qwen/qwen3.8-27b returns exactly the
+# requested {"probability": <number>}, so the provider is capable and the
+# model that was tested is not. See PARSER_EXTRA_CHAIN below.
+#
+# groq/openai/gpt-oss-120b still stays out of the parser chain, on its own
+# evidence, and stays in the reasoning chain where prose is what we want.
+STRUCTURED_OUTPUT_CAPABLE = {
+    "gemini/gemini-3.5-flash-lite",
+    "groq/qwen/qwen3.8-27b",
+}
+
+# Backends added to the PARSER chain only.
+#
+# Why the parser needed its own list: the parser's depth is decided by
+# STRUCTURED_OUTPUT_CAPABLE intersected with FALLBACK_CHAIN, and with
+# OpenRouter out of credit that intersection was ONE reachable backend --
+# Gemini, on a single 15 RPM credential. When Gemini rate-limited, the parser
+# had nowhere to go, structure_output() got no JSON, and the prediction was
+# discarded. That cost five questions outright on 2026-09-08 (runs
+# 34176403744 and 34193820860, 9 and 60 llm_exhausted respectively). In the
+# 06:14 run the REASONING was healthy -- nemotron answered 25 times -- so
+# nothing was wrong with the forecast except that it could not be parsed.
+#
+# Adding this to FALLBACK_CHAIN instead would have fixed the parser AND
+# silently reshaped the forecaster ensemble from three primaries to four. The
+# ensemble was validated end-to-end (run 34115592907); a parser fix has no
+# business changing it.
+#
+# MEASURED, not assumed, to the same standard as the Gemini entry above.
+# research/smoke_test_providers.py --structured-sweep asked Groq what it serves
+# and probed all 9 chat models with a strict json_schema response_format
+# (run 34409492553):
+#
+#   qwen/qwen3.8-27b     OK    parsed_keys ["probability"], raw {"probability": 0.42}
+#   openai/gpt-oss-120b  FAIL  BAD_REQUEST      <- the one model tested in 2026-08
+#   openai/gpt-oss-20b   FAIL  BAD_REQUEST
+#   qwen/qwen3.6-27b     FAIL  BAD_REQUEST
+#   + 5 more, all BAD_REQUEST
+#
+# So "Groq cannot emit structured output" was true of the model tested and
+# false of the provider. One measurement of one model had been carried forward
+# as if it settled the question.
+PARSER_EXTRA_CHAIN = [
+    ("groq/qwen/qwen3.8-27b", "GROQ_API_KEY"),
+]
 
 # forecasting-tools only applies a custom timeout to roles given as GeneralLlm;
 # a bare model string silently gets its 60s default. The free tier queues past
@@ -156,6 +200,16 @@ import os
 
 ACTIVE_FALLBACKS = [
     (model, env_var) for model, env_var in FALLBACK_CHAIN if os.getenv(env_var)
+]
+
+# Parser-only extras whose credential is present RIGHT NOW. Resolved here, at
+# import time, for the same reason ACTIVE_FALLBACKS is: every other env read in
+# this module happens once at patch time, so the generated main.py is an honest
+# record of what ran. Reading os.environ inside _fallbacks_for() instead would
+# make that one function's result depend on when it is called, and would make
+# its tests depend on the caller's environment.
+ACTIVE_PARSER_EXTRA = [
+    (model, env_var) for model, env_var in PARSER_EXTRA_CHAIN if os.getenv(env_var)
 ]
 
 # Additional Gemini credentials, each backed by its own Google project and so
@@ -201,6 +255,7 @@ RATE_LIMITED_MODELS = frozenset(
     {
         "gemini/gemini-3.5-flash-lite",
         "groq/openai/gpt-oss-120b",
+        "groq/qwen/qwen3.8-27b",
         "openrouter/nvidia/nemotron-3.5-lightning:free",
         "openrouter/openai/gpt-4o-mini",
     }
@@ -270,9 +325,15 @@ def _fallbacks_for(role: str) -> list[str]:
     Every role gets the full chain except the parser, which only gets backends
     verified to emit schema-constrained JSON."""
     models = [model for model, _env in ACTIVE_FALLBACKS]
-    if role == "parser":
-        return [m for m in models if m in STRUCTURED_OUTPUT_CAPABLE]
-    return models
+    if role != "parser":
+        return models
+    capable = [m for m in models if m in STRUCTURED_OUTPUT_CAPABLE]
+    # Parser-only extras, appended after the shared chain so the existing
+    # order is untouched and a credential that is absent contributes nothing.
+    for model, _env_var in ACTIVE_PARSER_EXTRA:
+        if model not in capable:
+            capable.append(model)
+    return capable
 
 
 GEMINI_MODEL = "gemini/gemini-3.5-flash-lite"

@@ -316,11 +316,17 @@ class ConfigurationTests(unittest.TestCase):
 
 
     def test_parser_only_gets_backends_that_can_emit_structured_json(self):
-        """Measured, not assumed: Gemini returned {"probability": 0.42};
-        Groq returned json_validate_failed with an empty generation."""
+        """Measured, not assumed. Both entries earned their place by returning
+        {"probability": 0.42} to a strict json_schema request:
+        gemini-3.5-flash-lite in run 32293364075, groq/qwen/qwen3.8-27b in the
+        catalogue sweep 34409492553."""
         import backtest.pin_models as pin
-        self.assertEqual(pin.STRUCTURED_OUTPUT_CAPABLE, {"gemini/gemini-3.5-flash-lite"})
+        self.assertEqual(
+            pin.STRUCTURED_OUTPUT_CAPABLE,
+            {"gemini/gemini-3.5-flash-lite", "groq/qwen/qwen3.8-27b"},
+        )
         pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
+        pin.ACTIVE_PARSER_EXTRA = []
         try:
             self.assertEqual(pin._fallbacks_for("parser"), ["gemini/gemini-3.5-flash-lite"])
             self.assertEqual(pin._fallbacks_for("default"),
@@ -328,11 +334,47 @@ class ConfigurationTests(unittest.TestCase):
         finally:
             pin.ACTIVE_FALLBACKS = []
 
+    def test_the_parser_extra_deepens_only_the_parser(self):
+        """The parser lost five questions on 2026-09-08 because its chain had
+        one reachable backend. The extra must fix that WITHOUT reshaping the
+        forecaster ensemble, which is decided by ACTIVE_FALLBACKS alone."""
+        import backtest.pin_models as pin
+        pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
+        pin.ACTIVE_PARSER_EXTRA = list(pin.PARSER_EXTRA_CHAIN)
+        try:
+            self.assertEqual(
+                pin._fallbacks_for("parser"),
+                ["gemini/gemini-3.5-flash-lite", "groq/qwen/qwen3.8-27b"],
+            )
+            # unchanged: the ensemble still sees exactly the shared chain
+            self.assertEqual(pin._fallbacks_for("default"),
+                             ["gemini/gemini-3.5-flash-lite", "groq/openai/gpt-oss-120b"])
+            self.assertEqual(pin._ensemble_primaries(pin.DEFAULTS["default"]),
+                             [pin.DEFAULTS["default"], "gemini/gemini-3.5-flash-lite",
+                              "groq/openai/gpt-oss-120b"])
+        finally:
+            pin.ACTIVE_FALLBACKS = []
+            pin.ACTIVE_PARSER_EXTRA = []
+
+    def test_the_parser_extra_contributes_nothing_without_its_credential(self):
+        """Resolved at import time from os.environ, exactly like
+        ACTIVE_FALLBACKS -- so an absent key is a shorter chain, never an
+        error, and never a backend litellm cannot authenticate."""
+        import backtest.pin_models as pin
+        pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
+        pin.ACTIVE_PARSER_EXTRA = []
+        try:
+            self.assertNotIn("groq/qwen/qwen3.8-27b", pin._fallbacks_for("parser"))
+        finally:
+            pin.ACTIVE_FALLBACKS = []
+
     def test_parser_stays_unwrapped_when_no_fallback_can_parse(self):
-        """Groq alone must not become the parser's fallback: prose where JSON
-        is required would discard the prediction the fallback just rescued."""
+        """Groq's gpt-oss-120b alone must not become the parser's fallback:
+        prose where JSON is required would discard the prediction the fallback
+        just rescued."""
         import backtest.pin_models as pin
         pin.ACTIVE_FALLBACKS = [("groq/openai/gpt-oss-120b", "GROQ_API_KEY")]
+        pin.ACTIVE_PARSER_EXTRA = []
         try:
             self.assertEqual(pin._fallbacks_for("parser"), [])
             self.assertEqual(pin._fallbacks_for("researcher"), ["groq/openai/gpt-oss-120b"])
