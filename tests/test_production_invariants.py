@@ -432,9 +432,18 @@ class WorkflowInvariants(unittest.TestCase):
                 "the quota-circumvention question is unresolved",
             )
 
-    def test_one_credential_generates_the_pre_bucket_block(self):
-        """The mitigation must be a real reduction, not a cosmetic one:
-        with a single credential pin_models must emit no BalancedLlm."""
+    def test_one_credential_generates_no_per_credential_bucket_wiring(self):
+        """The R11 mitigation must be a real reduction, not a cosmetic one.
+
+        Originally phrased as "emits no BalancedLlm". That proxy stopped
+        meaning what it was written to mean once the forecaster ensemble
+        started reusing BalancedLlm to spread the five forecast calls over
+        three DISTINCT MODELS -- a shape that needs one credential per
+        provider, which is exactly what production has. The property R11
+        actually promised is that no SECOND Gemini credential is wired up, so
+        that is what is asserted now: no bucket_backend call, no limiter_key,
+        and no GEMINI2/3/4 anywhere in the generated source.
+        """
         import importlib
         import sys
 
@@ -452,7 +461,10 @@ class WorkflowInvariants(unittest.TestCase):
             pin_models = importlib.import_module("backtest.pin_models")
             self.assertFalse(pin_models.BALANCED)
             generated = pin_models.patch(read("main.py"), pin_models.DEFAULTS)
-            self.assertNotIn("BalancedLlm(", generated)
+            self.assertNotIn("bucket_backend(", generated)
+            self.assertNotIn("limiter_key", generated)
+            for extra in ("GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY"):
+                self.assertNotIn(extra, generated)
             self.assertIn("FallbackLlm([", generated)
         finally:
             for key, value in saved.items():
@@ -460,6 +472,127 @@ class WorkflowInvariants(unittest.TestCase):
                 if value is not None:
                     os.environ[key] = value
             sys.modules.pop("backtest.pin_models", None)
+
+    #: The tournament workflow polls inside one run instead of relying on the
+    #: schedule event, because the event is dropped. See docs/cadence.md.
+    TOURNAMENT = (".github", "workflows", "run_bot_on_tournament.yaml")
+
+    def _poll_settings(self) -> dict:
+        text = read(*self.TOURNAMENT)
+        out = {}
+        for key in ("POLL_WINDOW_SECONDS", "POLL_INTERVAL_SECONDS"):
+            match = re.search(key + r':\s*"(\d+)"', text)
+            self.assertIsNotNone(match, key + " is gone from the workflow")
+            out[key] = int(match.group(1))
+        timeout = re.search(r"timeout-minutes:\s*(\d+)", text)
+        self.assertIsNotNone(timeout, "the Run bot step lost its timeout")
+        out["timeout_seconds"] = int(timeout.group(1)) * 60
+        return out
+
+    def test_the_poll_window_fits_inside_the_step_timeout(self):
+        """A window longer than the timeout would be cut off mid-poll every
+        single run, which looks like a flaky bot rather than a misconfigured
+        one."""
+        s = self._poll_settings()
+        self.assertGreater(
+            s["timeout_seconds"], s["POLL_WINDOW_SECONDS"],
+            "the timeout must leave room for the window plus the last poll",
+        )
+
+    def test_the_step_timeout_stays_under_githubs_job_ceiling(self):
+        """GitHub kills a job at 6 hours. A step timeout above that is a
+        promise the platform will not keep."""
+        self.assertLess(self._poll_settings()["timeout_seconds"], 6 * 60 * 60)
+
+    def test_the_poll_interval_is_the_schedule_granularity(self):
+        """5 minutes is the shortest interval GitHub's scheduler accepts, and
+        the whole point of polling is to get that granularity for real."""
+        self.assertEqual(self._poll_settings()["POLL_INTERVAL_SECONDS"], 300)
+
+    def test_a_failed_poll_does_not_abort_the_remaining_window(self):
+        """One bad question or one provider blip must not blind the bot for
+        the rest of the window -- that would be strictly worse than the single
+        shot this replaced."""
+        text = read(*self.TOURNAMENT)
+        self.assertNotIn(
+            "set -euo pipefail", text,
+            "-e would abort the whole window on the first non-zero poll",
+        )
+        self.assertIn("set -uo pipefail", text)
+
+    def test_a_window_where_every_poll_failed_still_fails_the_job(self):
+        """The other half: swallowing every error would leave a systemic
+        break (dead token, dead providers) reported as a green run, and the
+        WhatsApp failure notifier keys off the job result."""
+        text = read(*self.TOURNAMENT)
+        self.assertIn('if [ "${failures}" -eq "${polls}" ]; then', text)
+        self.assertIn("exit 1", text)
+
+    def test_the_loop_still_runs_the_real_bot(self):
+        text = read(*self.TOURNAMENT)
+        self.assertIn("poetry run python main.py", text)
+
+    def test_long_runs_hand_over_rather_than_cancel_each_other(self):
+        """With multi-hour runs, cancel-in-progress would kill a run
+        mid-forecast whenever a new schedule event landed. Queueing instead
+        makes the next run start the moment this one ends, which is the
+        continuous coverage the whole change is for."""
+        text = yaml_without_comments(*self.TOURNAMENT)
+        self.assertIn("cancel-in-progress: false", text)
+
+    def test_the_pin_step_and_the_run_step_get_the_same_provider_keys(self):
+        """A fallback chain is configured in TWO places and both must agree.
+
+        pin_models reads os.environ at PATCH time to decide which backends to
+        write into the generated llms= block; litellm reads it again at RUN
+        time to authenticate them. Give the keys to only one step and the
+        failure is silent in both directions:
+
+          pin only -> the block names Gemini and Groq, litellm has no
+                      credential for either, and every fallback leg dies. This
+                      was live on run_bot_on_metaculus_cup.yaml, which
+                      publishes to a SCORED tournament.
+          run only -> pin_models sees no keys, emits a single GeneralLlm per
+                      role, and the chain silently does not exist at all. This
+                      was live on test_bot.yaml, the pre-flight smoke test,
+                      so the check that is supposed to catch problems before a
+                      real run was testing a configuration production never
+                      uses.
+
+        Asserted per workflow that runs main.py, over the provider keys that
+        actually gate the chain.
+        """
+        chain_keys = ("GEMINI_API_KEY", "GROQ_API_KEY")
+        workflow_dir = os.path.join(ROOT, ".github", "workflows")
+        checked = 0
+        for name in sorted(os.listdir(workflow_dir)):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            text = yaml_without_comments(".github", "workflows", name)
+            # Must EXECUTE main.py, not merely mention it: ci.yaml names the
+            # file in a test command without ever running the bot.
+            if "python main.py" not in text:
+                continue
+            # research_fallback_e2e runs main.py with OpenRouter deliberately
+            # absent; it is an experiment about a missing key, not production.
+            if name.startswith("research_"):
+                continue
+            steps = text.split("- name:")
+            pin = [b for b in steps if "pin_models.py" in b]
+            run = [b for b in steps if "python main.py" in b]
+            self.assertTrue(pin, "{0}: no pin_models step".format(name))
+            self.assertTrue(run, "{0}: no main.py step".format(name))
+            for key in chain_keys:
+                for label, blocks in (("pin", pin), ("run", run)):
+                    self.assertTrue(
+                        any(key in b for b in blocks),
+                        "{0}: {1} step is missing {2}; the fallback chain "
+                        "would be half-configured".format(name, label, key),
+                    )
+            checked += 1
+        self.assertGreaterEqual(
+            checked, 3, "expected tournament, cup and test_bot to be covered"
+        )
 
     def test_every_workflow_that_can_publish_to_a_scored_tournament_pins_models(self):
         """Without pin_models, forecasting-tools assigns the researcher role to

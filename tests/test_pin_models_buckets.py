@@ -60,13 +60,39 @@ class BucketDetectionTests(unittest.TestCase):
 
 class GeneratedBlockTests(unittest.TestCase):
     def test_single_key_output_contains_no_bucket_machinery(self):
-        """REQUIREMENT 6: the one-key install must look exactly as before."""
+        """REQUIREMENT 6: one Gemini credential must produce no PER-CREDENTIAL
+        machinery.
+
+        Narrowed deliberately when the forecaster ensemble landed. BalancedLlm
+        is no longer evidence of bucketing: the ensemble reuses that class to
+        spread the five forecast calls over the three distinct primary models,
+        which needs exactly one credential each. What must still be absent with
+        one Gemini key is the bucket wiring -- bucket_backend, limiter_key, and
+        any GEMINI2/3/4 env var name -- because that, not BalancedLlm, is what
+        R11 declined to run in production.
+        """
         pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
         block = pm.build_block(pm.DEFAULTS)
-        self.assertNotIn("BalancedLlm", block)
         self.assertNotIn("bucket_backend", block)
         self.assertNotIn("limiter_key", block)
+        for env_var in pm.GEMINI_BUCKET_ENV_VARS[1:]:
+            self.assertNotIn(env_var, block)
         self.assertIn("FallbackLlm", block)
+
+    def test_single_key_output_still_ensembles_the_forecaster(self):
+        """The other half of the narrowing above: with one Gemini credential
+        the default role must STILL ensemble across primary models, or the
+        change silently reverts to five samples of one model."""
+        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        block = pm.build_block(pm.DEFAULTS)
+        default_entry = block[block.index('"default"'):block.index('"summarizer"')]
+        self.assertIn("BalancedLlm", default_entry)
+        for primary in pm._ensemble_primaries(pm.DEFAULTS["default"]):
+            self.assertIn('"{0}"'.format(primary), default_entry)
+        # Roles called once per question gain nothing from a lottery over
+        # models, so they stay single chains.
+        rest = block[block.index('"summarizer"'):]
+        self.assertNotIn("BalancedLlm", rest)
 
     def test_balanced_output_wraps_one_chain_per_credential(self):
         pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GEMINI3_API_KEY="c",
@@ -126,16 +152,38 @@ class ImportWiringTests(unittest.TestCase):
         self.assertEqual(once.count("from backtest.balanced_llm import"), 1)
         self.assertEqual(pm.patch(once, pm.DEFAULTS), once, "patch must be idempotent")
 
-    def test_single_key_patch_adds_no_balanced_import(self):
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-        once = pm.patch(self._main_src(), pm.DEFAULTS)
-        self.assertNotIn("from backtest.balanced_llm import", once)
-        self.assertIn("from backtest.fallback_llm import FallbackLlm", once)
+    def test_the_balanced_import_tracks_whether_the_block_uses_it(self):
+        """The import must be present exactly when the generated block names
+        BalancedLlm, and absent otherwise -- disagreeing either way is the one
+        thing this generator can do that makes main.py raise at startup.
 
-    def test_dropping_a_key_removes_the_balanced_import_again(self):
+        Both directions are checked against the block itself rather than
+        against a re-derived condition, so this stays true whichever feature
+        (buckets or the forecaster ensemble) is the reason it appears.
+        """
+        for env in (
+            {"GEMINI_API_KEY": "a", "GROQ_API_KEY": "g"},
+            {"GEMINI_API_KEY": "a", "GEMINI2_API_KEY": "b", "GROQ_API_KEY": "g"},
+            {},  # no fallback keys at all: single GeneralLlm per role
+        ):
+            with self.subTest(env=sorted(env)):
+                pm = load(**env)
+                once = pm.patch(self._main_src(), pm.DEFAULTS)
+                uses = "BalancedLlm(" in once[once.index("llms={"):]
+                imported = "from backtest.balanced_llm import" in once
+                self.assertEqual(
+                    uses, imported,
+                    "block uses BalancedLlm={0} but import present={1}".format(
+                        uses, imported),
+                )
+
+    def test_dropping_every_fallback_key_removes_the_balanced_import_again(self):
+        """Converge-either-way: a source patched WITH the import must lose it
+        when the keys that justified it are gone."""
         pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GROQ_API_KEY="g")
         balanced = pm.patch(self._main_src(), pm.DEFAULTS)
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        self.assertIn("from backtest.balanced_llm import", balanced)
+        pm = load()  # no fallback keys: nothing to balance or fall back to
         reverted = pm.patch(balanced, pm.DEFAULTS)
         self.assertNotIn("from backtest.balanced_llm import", reverted)
 
@@ -193,6 +241,36 @@ class DriftTests(unittest.TestCase):
 
         pm = load(GEMINI_API_KEY="a")
         self.assertEqual(pm.GEMINI_BUCKET_MODEL, rl.GEMINI_MODEL)
+
+    def test_rate_limited_models_matches_the_real_registry(self):
+        """pin_models duplicates the set of rate-limiter-registered model
+        strings because it cannot import backtest.* (see the test below). This
+        pins the copy to the original.
+
+        It is a safety property, not tidiness: DEFAULT_LIMITS.get(model,
+        ProviderLimits()) hands back an UNTHROTTLED limiter for an unknown key,
+        so an ensemble bucket key that drifted out of the registry would look
+        controlled and enforce nothing -- silently removing Groq's measured
+        8000 TPM cap.
+        """
+        from backtest import rate_limiter
+
+        pm = load()
+        self.assertEqual(
+            set(pm.RATE_LIMITED_MODELS),
+            set(rate_limiter.DEFAULT_LIMITS),
+            "pin_models.RATE_LIMITED_MODELS has drifted from "
+            "rate_limiter.DEFAULT_LIMITS",
+        )
+
+    def test_every_ensemble_bucket_key_is_rate_limited(self):
+        """The keys the generator actually emits must all be registered, for
+        the same reason. Checked against the real registry, not the copy."""
+        from backtest import rate_limiter
+
+        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        for primary in pm._ensemble_primaries(pm.DEFAULTS["default"]):
+            self.assertIn(primary, rate_limiter.DEFAULT_LIMITS, primary)
 
     def test_pin_models_imports_nothing_from_backtest(self):
         """It runs as `python backtest/pin_models.py`, with the repo root off

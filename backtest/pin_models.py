@@ -50,6 +50,23 @@ dies at once - parser included. Excluding it would leave the exact failure
 mode this feature exists for (an OpenRouter-wide outage) able to kill the run
 through the one role left unprotected.
 
+Forecaster ensemble
+-------------------
+main.py asks for five predictions per question, and until now all five came
+from one model -- five correlated samples whose shared blind spots survive the
+average. The "default" role is therefore wrapped in a BalancedLlm holding one
+fallback chain per PRIMARY model, so the five calls spread across the distinct
+providers instead. Copied from FutureSearch, currently first in this same
+tournament, who publish the result in "Run agents twice for fun and profit"
+(2026-05-01): "Ensembling across two Opus 4.6 runs and other frontier models
+cuts Brier score".
+
+No new provider and no spend: these are the three models the fallback chain
+already carries. Only the forecaster gets it -- summarizer and researcher are
+called once per question, where choosing a model at random is a lottery rather
+than an ensemble, and the parser is restricted to backends that emit
+schema-constrained JSON.
+
 Why the defaults are what they are
 ----------------------------------
 Metaculus's own FutureEval writeup found model choice to be the single largest
@@ -169,6 +186,27 @@ GEMINI_BUCKET_ENV_VARS = (
     "GEMINI4_API_KEY",
 )
 
+# Model strings that backtest.rate_limiter.DEFAULT_LIMITS registers a limiter
+# for. Duplicated here for exactly the reason GEMINI_BUCKET_KEYS is duplicated
+# above: this file runs as a bare script with the repo root off sys.path, so
+# `from backtest.rate_limiter import ...` would raise ModuleNotFoundError
+# before the bot ever starts. tests/test_pin_models_buckets.py asserts the two
+# never drift apart.
+#
+# It matters because `DEFAULT_LIMITS.get(model, ProviderLimits())` returns an
+# UNTHROTTLED limiter for an unknown key: an ensemble bucket key missing from
+# the registry would look controlled and rate-limit nothing, quietly removing
+# Groq's measured 8000 TPM cap.
+RATE_LIMITED_MODELS = frozenset(
+    {
+        "gemini/gemini-3.5-flash-lite",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/nvidia/nemotron-3.5-lightning:free",
+        "openrouter/openai/gpt-4o-mini",
+    }
+    | set(GEMINI_BUCKET_KEYS)
+)
+
 # (env_var, limiter_key) for the credentials present RIGHT NOW. Read at patch
 # time, like ACTIVE_FALLBACKS, so the generated main.py is an honest record of
 # what ran. A key present here contributes a bucket; a key absent contributes
@@ -240,6 +278,78 @@ def _fallbacks_for(role: str) -> list[str]:
 GEMINI_MODEL = "gemini/gemini-3.5-flash-lite"
 
 
+# ---------------------------------------------------------------- ensemble
+# MODEL DIVERSITY FOR THE FORECASTER ROLE.
+#
+# main.py asks for predictions_per_research_report=5, so the "default" role is
+# invoked five times per question and the five answers are aggregated. Until
+# now all five came from the SAME model at temperature 0.3, which averages five
+# highly correlated samples: the shared prior, and the shared blind spots,
+# survive the mean untouched.
+#
+# FutureSearch (currently first in the same tournament) publishes the finding
+# this copies, in "Run agents twice for fun and profit" (2026-05-01):
+#
+#     "Running the same forecasting agent more than once and averaging beats
+#      any single run."  ... "Ensembling across two Opus 4.6 runs AND OTHER
+#      FRONTIER MODELS cuts Brier score"
+#
+# The second half is the part we were missing. Their Polymarket writeup states
+# the same shape concretely: "six research agents and three forecasting models
+# per market".
+#
+# So the default role becomes a BalancedLlm over one chain PER PRIMARY MODEL.
+# Each of the five calls enters the least-loaded chain, which spreads them over
+# the distinct primaries instead of hammering one.
+#
+# What this is NOT:
+#   * not a new provider, not a new credential, not a euro of spend - these are
+#     the same three models the fallback chain already carries, all three
+#     verified end-to-end by research/smoke_test_providers.py (run 32293364075)
+#   * not a change to how many predictions exist, nor to aggregation, nor to
+#     the success threshold - BalancedLlm is one call in, one string out
+#   * not applied to summarizer/researcher (called once per question, so
+#     "diversity" there is a lottery over which model answers, not an ensemble)
+#     nor to parser (only Gemini emits schema-constrained JSON here)
+#
+# Bucket keys are the primary model names themselves, which is deliberate:
+# those are the exact strings backtest.rate_limiter.DEFAULT_LIMITS registers,
+# so the balancer measures load on the SAME limiters the backends acquire from,
+# rather than keeping a parallel set of books. test_pin_models asserts every
+# emitted bucket key is registered - an unregistered key silently resolves to
+# an UNTHROTTLED limiter, which would quietly disable Groq's 8000 TPM cap.
+def _ensemble_primaries(model: str) -> list[str]:
+    """The distinct primary models the forecaster ensembles over.
+
+    ``model`` (the configured default, overridable via models.txt) leads, then
+    every active fallback that is not already it, in the production order
+    OpenRouter -> Gemini -> Groq. With no fallback keys present this is a
+    single entry and the caller emits exactly what it emitted before.
+    """
+    primaries = [model]
+    for fb_model, _env in ACTIVE_FALLBACKS:
+        if fb_model not in primaries:
+            primaries.append(fb_model)
+    return primaries
+
+
+def _ensemble_expr(model: str) -> str:
+    """One BalancedLlm holding one FallbackLlm per primary model.
+
+    Chain i puts primary i first and keeps the remaining models in their
+    canonical production order, so every chain still degrades through the same
+    ladder it always did - only its starting rung differs.
+    """
+    primaries = _ensemble_primaries(model)
+    chains = []
+    for primary in primaries:
+        others = [m for m in primaries if m != primary]
+        chains.append(_chain_expr(primary, others, bucket=None, indent=16))
+    joined = ",\n                ".join(chains)
+    keys = ", ".join(f'"{p}"' for p in primaries)
+    return f"BalancedLlm([\n                {joined},\n            ], [{keys}])"
+
+
 def _bucket_expr(env_var: str, limiter_key: str) -> str:
     """One Gemini link bound to a specific credential and quota bucket.
 
@@ -289,6 +399,17 @@ def _role_expr(role: str, model: str) -> str:
     once per bucket and the copies are wrapped in a BalancedLlm. With one
     credential the output is exactly what it was before buckets existed --
     there is no BalancedLlm around a single chain.
+
+    The "default" role additionally ensembles across primary models -- see the
+    ensemble note above _ensemble_primaries. That path and the Gemini-bucket
+    path are deliberately NOT combined: buckets replicate ONE model across
+    credentials, the ensemble replicates DIFFERENT models across one credential
+    each, and a cross-product of the two would emit len(primaries) x
+    len(buckets) chains whose load accounting no longer maps one-to-one onto a
+    limiter. Buckets win if both are somehow active, because that is the path
+    with the measured quota evidence behind it (runs 32380381980 / 32381181256).
+    In production BALANCED is False by the R11 decision, so the ensemble is what
+    runs.
     """
     if role not in REASONING_ROLES:
         return _backend_expr(model)
@@ -297,6 +418,8 @@ def _role_expr(role: str, model: str) -> str:
         return _backend_expr(model)
 
     if not (BALANCED and GEMINI_MODEL in fallbacks):
+        if role == "default" and len(_ensemble_primaries(model)) > 1:
+            return _ensemble_expr(model)
         return _chain_expr(model, fallbacks, bucket=None)
 
     chains = [
@@ -360,11 +483,17 @@ BALANCED_IMPORT_LINE = (
 )
 
 
-def _ensure_fallback_import(src: str) -> str:
+def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
     """Add the FallbackLlm import once, only when a fallback chain is active.
     Idempotent and independent of whether the llms= block itself is patched
     yet, so re-running after an env change (a key added or removed) converges
-    to the right import state on the next invocation either way."""
+    to the right import state on the next invocation either way.
+
+    ``wants_balanced`` says whether the block ABOUT to be generated actually
+    names BalancedLlm -- true for the Gemini-bucket path and for the forecaster
+    ensemble alike. It is passed in rather than recomputed here because only
+    the caller knows the resolved model names, and the ensemble's shape depends
+    on them (see _ensemble_primaries)."""
     has_import = IMPORT_LINE in src
     if ACTIVE_FALLBACKS and not has_import:
         if IMPORT_ANCHOR not in src:
@@ -382,15 +511,29 @@ def _ensure_fallback_import(src: str) -> str:
     # The balanced import follows the same converge-either-way rule, so adding
     # or removing a secondary key and re-running lands in the right state.
     has_balanced = BALANCED_IMPORT_LINE in src
-    if BALANCED and ACTIVE_FALLBACKS and not has_balanced:
+    needs_balanced = wants_balanced and bool(ACTIVE_FALLBACKS)
+    if needs_balanced and not has_balanced:
         if IMPORT_LINE not in src:
             raise LookupError(
                 "FallbackLlm import missing; cannot anchor the balanced import"
             )
         src = src.replace(IMPORT_LINE, IMPORT_LINE + BALANCED_IMPORT_LINE, 1)
-    elif (not BALANCED or not ACTIVE_FALLBACKS) and has_balanced:
+    elif not needs_balanced and has_balanced:
         src = src.replace(BALANCED_IMPORT_LINE, "", 1)
     return src
+
+
+def _block_uses_balanced(models: dict[str, str]) -> bool:
+    """Does the block we are about to emit name BalancedLlm anywhere?
+
+    Asked of the generator itself rather than re-deriving the condition, so the
+    import can never disagree with the code it has to support -- which is the
+    one way this file can produce a main.py that raises NameError at startup.
+    """
+    return any(
+        "BalancedLlm(" in _role_expr(role, models[role])
+        for role in ("default", "summarizer", "researcher", "parser")
+    )
 
 
 # main.py's own module docstring contains a *documentation example* of an
@@ -428,7 +571,7 @@ def _llms_block_span(src: str) -> tuple[int, int] | None:
 
 
 def patch(src: str, models: dict[str, str]) -> str:
-    src = _ensure_fallback_import(src)
+    src = _ensure_fallback_import(src, wants_balanced=_block_uses_balanced(models))
 
     span = _llms_block_span(src)
     if span is not None:
@@ -446,7 +589,7 @@ def patch(src: str, models: dict[str, str]) -> str:
     return src.replace(ANCHOR, build_block(models))
 
 
-def _eval_llms_dict(generated: str, active_fallbacks: list) -> dict:
+def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, str] | None = None) -> dict:
     """Actually execute the generated `llms={...}` block against stand-ins for
     GeneralLlm/FallbackLlm and return the resulting dict. ast.parse only proves
     the code is syntactically valid Python - it does NOT prove `llms={{...}}`
@@ -454,6 +597,7 @@ def _eval_llms_dict(generated: str, active_fallbacks: list) -> dict:
     parses as a dict rather than a set-containing-a-dict, which is valid
     syntax but crashes at runtime with "unhashable type: dict". This caught
     exactly that bug; keep it, do not downgrade it back to just ast.parse."""
+    models = models if models is not None else DEFAULTS
     span = _llms_block_span(generated)
     assert span is not None, "generated code has no llms={...} block to evaluate"
     block_src = generated[span[0] : span[1]].strip().rstrip(",")
@@ -531,6 +675,41 @@ def _eval_llms_dict(generated: str, active_fallbacks: list) -> dict:
                     "they would contend for one quota"
                 )
                 continue
+            if role == "default" and len(_ensemble_primaries(models[role])) > 1:
+                # One chain per PRIMARY model. Every chain must still carry the
+                # full set of primaries -- only the starting rung differs -- so
+                # a chain that begins on a saturated provider can still degrade
+                # to the other two rather than losing the prediction.
+                primaries = _ensemble_primaries(models[role])
+                assert isinstance(entry, _StubBalancedLlm), (
+                    f"{role} should ensemble across {len(primaries)} models"
+                )
+                assert entry.bucket_keys == primaries, (
+                    f"{role}: bucket keys {entry.bucket_keys} != primaries {primaries}"
+                )
+                assert len(entry.chains) == len(primaries), (
+                    f"{role}: {len(entry.chains)} chains for {len(primaries)} primaries"
+                )
+                for chain, primary in zip(entry.chains, primaries):
+                    assert isinstance(chain, _StubFallbackLlm)
+                    served = [b.model for b in chain.backends]
+                    assert served[0] == primary, (
+                        f"{role}: chain leads with {served[0]}, expected {primary}"
+                    )
+                    assert sorted(served) == sorted(primaries), (
+                        f"{role}: chain {served} does not cover every primary "
+                        f"{primaries}; a saturated lead would lose the call"
+                    )
+                # An unregistered limiter key resolves to an UNTHROTTLED
+                # limiter, which would silently disable Groq's measured 8000
+                # TPM cap. Checked against RATE_LIMITED_MODELS, which
+                # test_pin_models_buckets pins to rate_limiter.DEFAULT_LIMITS.
+                for key in entry.bucket_keys:
+                    assert key in RATE_LIMITED_MODELS, (
+                        f"{role}: {key!r} is not a rate-limiter-registered "
+                        "model, so its limiter would enforce nothing"
+                    )
+                continue
             assert isinstance(entry, _StubFallbackLlm), f"{role} should be wrapped"
             assert len(entry.backends) == 1 + len(expected_fallbacks), (
                 f"{role}: expected {1 + len(expected_fallbacks)} backends, "
@@ -565,7 +744,7 @@ def selftest() -> None:
     assert DEFAULTS["default"] in once
     assert DEFAULTS["parser"] in once
     ast.parse(once)                                   # the result still has to be valid Python
-    _eval_llms_dict(once, ACTIVE_FALLBACKS)           # ...and evaluate to a real dict, not a set
+    _eval_llms_dict(once, ACTIVE_FALLBACKS, DEFAULTS)           # ...and evaluate to a real dict, not a set
     assert patch(once, DEFAULTS) == once              # idempotent
 
     try:
@@ -595,10 +774,18 @@ def selftest() -> None:
     # OpenRouter backend, so the model string appears once per chain per role.
     # The parser is excluded from this count: it uses a different default.
     chains_per_role = len(ACTIVE_GEMINI_BUCKETS) if BALANCED else 1
-    assert trapped.count(DEFAULTS["default"]) == 3 * chains_per_role, (
-        "expected {0} occurrences ({1} reasoning roles x {2} chain(s)), got {3}".format(
-            3 * chains_per_role, 3, chains_per_role,
-            trapped.count(DEFAULTS["default"]))
+    n_ens = 1 if BALANCED else len(_ensemble_primaries(DEFAULTS["default"]))
+    if n_ens > 1:
+        # Forecaster ensemble: the default model leads one chain and appears
+        # once inside each of the others, so n_ens times in all; plus ONE more
+        # in the BalancedLlm bucket-key list, which names every primary exactly
+        # once; plus researcher and summarizer, one single chain each.
+        expected_default = n_ens + 1 + 2
+    else:
+        expected_default = 3 * chains_per_role
+    assert trapped.count(DEFAULTS["default"]) == expected_default, (
+        "expected {0} occurrences of the default model, got {1}".format(
+            expected_default, trapped.count(DEFAULTS["default"]))
     )
     real_block_start = trapped.index(BOT_INIT_ANCHOR)
     assert 'model="openrouter/openai/gpt-4o"' not in trapped[real_block_start:], (
@@ -625,26 +812,45 @@ def selftest() -> None:
         BALANCED = False
         parser_fallbacks = _fallbacks_for("parser")
         reasoning_fallbacks = _fallbacks_for("default")
+        # The forecaster ensembles over one chain per primary model, and every
+        # chain names every primary exactly once (same models, different lead).
+        # So each model string appears: once for researcher, once for
+        # summarizer, n_ens times for default, plus once more if the parser can
+        # use it. Derived from _ensemble_primaries rather than hardcoded, so
+        # adding a provider to FALLBACK_CHAIN cannot silently invalidate this.
+        n_ens = len(_ensemble_primaries(DEFAULTS["default"]))
+        # Per model string: n_ens leads/links inside the ensemble chains, plus
+        # ONE appearance in the BalancedLlm bucket-key list (which names every
+        # primary exactly once), plus researcher and summarizer, plus the
+        # parser when that model can emit schema-constrained JSON.
+        def _expected(model: str) -> int:
+            return n_ens + 3 + (1 if model in parser_fallbacks else 0)
+
         with_fb = patch(stub, DEFAULTS)
         assert IMPORT_LINE in with_fb
-        # default/researcher/summarizer share one model string in DEFAULTS
-        # (3 occurrences as FallbackLlm primaries); parser has its own
-        # distinct model string, so it is not part of this count.
-        assert with_fb.count(DEFAULTS["default"]) == 3
+        assert with_fb.count(DEFAULTS["default"]) == _expected(DEFAULTS["default"]), (
+            f"default model: expected {_expected(DEFAULTS['default'])}, got "
+            f"{with_fb.count(DEFAULTS['default'])}"
+        )
         assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["default"] in with_fb
         # Reasoning roles get every active fallback; the parser gets only the
         # structured-output-capable subset, so counts differ by design.
         for model in reasoning_fallbacks:
-            expected = 3 + (1 if model in parser_fallbacks else 0)
-            assert with_fb.count(model) == expected, (
-                f"{model}: expected {expected} occurrences, got {with_fb.count(model)}"
+            assert with_fb.count(model) == _expected(model), (
+                f"{model}: expected {_expected(model)} occurrences, got "
+                f"{with_fb.count(model)}"
             )
-        wrapped_roles = 3 + (1 if parser_fallbacks else 0)
+        # default contributes n_ens chains; researcher and summarizer one each.
+        wrapped_roles = n_ens + 2 + (1 if parser_fallbacks else 0)
         assert with_fb.count("FallbackLlm([") == wrapped_roles
+        assert with_fb.count("BalancedLlm([") == (1 if n_ens > 1 else 0), (
+            "the forecaster ensemble must emit exactly one BalancedLlm"
+        )
+        assert BALANCED_IMPORT_LINE in with_fb if n_ens > 1 else True
         if parser_fallbacks:
             assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["parser"] in with_fb
         ast.parse(with_fb)
-        _eval_llms_dict(with_fb, ACTIVE_FALLBACKS)  # real dict, correct backend count per role
+        _eval_llms_dict(with_fb, ACTIVE_FALLBACKS, DEFAULTS)  # real dict, correct backend count per role
         assert patch(with_fb, DEFAULTS) == with_fb  # idempotent with fallback active too
 
         # Balanced wiring: the same roles, one chain per credential. Counts
@@ -664,7 +870,7 @@ def selftest() -> None:
             occurrences = balanced_src.count('"{0}"'.format(key))
             assert occurrences > 0, "bucket {0} never appears".format(key)
         ast.parse(balanced_src)
-        _eval_llms_dict(balanced_src, ACTIVE_FALLBACKS)
+        _eval_llms_dict(balanced_src, ACTIVE_FALLBACKS, DEFAULTS)
         assert patch(balanced_src, DEFAULTS) == balanced_src  # idempotent
         ACTIVE_GEMINI_BUCKETS = [(GEMINI_BUCKET_ENV_VARS[0], GEMINI_BUCKET_KEYS[0])]
         BALANCED = False

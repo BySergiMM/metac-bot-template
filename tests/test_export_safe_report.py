@@ -16,6 +16,7 @@ from research.analyze_track_record import analyze
 from research.export_safe_report import (
     UnsafeReportError,
     assert_safe,
+    RAW_CONTENT_TOKENS,
     build_safe_summary,
     render_text,
 )
@@ -186,6 +187,138 @@ class MissingDataTests(unittest.TestCase):
         )
         self.assertEqual(safe["account"]["has_bot_benchmarking_tier"], "probe_failed")
         self.assertNotIn("secret-ish", json.dumps(safe))
+
+    def test_a_missing_input_named_like_a_banned_key_does_not_abort_the_export(self):
+        """Regression: the exporter used to die on its own diagnostics.
+
+        `missing_inputs` counts HOW MANY questions lacked each scoring input,
+        and one of those inputs is legitimately called
+        "probability_of_resolution". Emitted as a dict its NAME became a key,
+        and assert_safe() rejects banned key names wherever they nest -- so
+        the whole publishable artifact failed to build the moment any question
+        became unscoreable, which is the normal case (33 of 57 on
+        2026-09-07). The guard is unchanged; the diagnostic is now a list of
+        records, so the name is a value.
+        """
+        safe = build_safe_summary(
+            {"scoring": {"missing_inputs": {"probability_of_resolution": 33,
+                                            "geometric_mean_of_other_forecasters": 24},
+                         "n_scored": 57}}
+        )
+        assert_safe(safe)  # must not raise
+        text = render_text(safe)
+        blob = json.dumps(safe) + text
+        # The count survives, under a reason code from the closed vocabulary.
+        self.assertIn("outcome_probability_absent", text)
+        self.assertIn("33", text)
+        # And the provider-side field name reaches neither the JSON nor the
+        # text: the workflow's "Refuse to publish raw data" step greps the
+        # finished artifact for exactly this token.
+        self.assertNotIn("probability_of_resolution", blob)
+
+    def test_an_unknown_missing_input_cannot_introduce_a_raw_name(self):
+        """The vocabulary is closed on purpose: a scoring input added upstream
+        must not be able to put a new provider-side name into a world-readable
+        file just by existing."""
+        safe = build_safe_summary(
+            {"scoring": {"missing_inputs": {"some_new_internal_field": 4}}}
+        )
+        assert_safe(safe)
+        blob = json.dumps(safe) + render_text(safe)
+        self.assertNotIn("some_new_internal_field", blob)
+        self.assertIn("other", json.dumps(safe["offline_scoring"]["unscoreable_counts"]))
+
+    def test_the_banned_key_guard_itself_is_unchanged(self):
+        """The fix above must not have been a relaxation of the guard: a real
+        per-question probability keyed by that name must still abort."""
+        with self.assertRaises(Exception):
+            assert_safe({"per_question": {"probability_of_resolution": 0.93}})
+
+    def test_directional_hit_rate_is_suppressed_below_the_small_n_floor(self):
+        """An accuracy rate over one or two questions would constrain those
+        questions' outcomes, which is a resolution leak by arithmetic."""
+        safe = build_safe_summary(
+            {"scoring": {"n_directional": 2, "n_directional_hits": 2,
+                         "directional_hit_rate": 1.0}}
+        )
+        assert_safe(safe)
+        self.assertNotIsInstance(safe["offline_scoring"]["directional_hit_rate"], float)
+
+    def test_directional_hit_rate_survives_above_the_floor(self):
+        safe = build_safe_summary(
+            {"scoring": {"n_directional": 22, "n_directional_hits": 15,
+                         "directional_hit_rate": 15 / 22.0}}
+        )
+        assert_safe(safe)
+        self.assertAlmostEqual(safe["offline_scoring"]["directional_hit_rate"], 15 / 22.0)
+        self.assertIn("15/22", render_text(safe))
+
+    def test_the_whole_real_report_shape_passes_both_publication_guards(self):
+        """The shape run 34109534444 actually produced.
+
+        Three separate places carried the same raw scoring-input names --
+        scoring.missing_inputs, validation.spot_peer.missing_terms and
+        benchmark_coverage.discard_reasons -- and fixing them one at a time
+        cost one CI run each. This pins all three at once, with the real
+        nesting, so the next one fails locally.
+        """
+        report = {
+            "scoring": {
+                "missing_inputs": {"probability_of_resolution": 33,
+                                   "geometric_mean_of_other_forecasters": 24},
+                "n_scored": 57, "n_directional": 22, "n_directional_hits": 18,
+                "directional_hit_rate": 18 / 22.0, "mean_spot_brier": 0.1853,
+            },
+            "validation": {"spot_peer": {
+                "status": "UNAVAILABLE",
+                "blocked_reason": "no geometric-mean aggregate rows",
+                "missing_terms": ["geometric_mean_of_other_forecasters",
+                                  "probability_of_resolution"],
+            }},
+            "benchmark_coverage": {"discard_reasons": {
+                "unresolved_or_annulled": 13, "no_probability_of_resolution": 33,
+            }},
+        }
+        safe = build_safe_summary(report)
+        assert_safe(safe)
+        blob = json.dumps(safe) + render_text(safe)
+        for token in RAW_CONTENT_TOKENS:
+            self.assertNotIn(token, blob.lower(), token)
+        # ...and the information survived the translation, in all three places.
+        text = render_text(safe)
+        self.assertIn("outcome_probability_absent x33", text)
+        self.assertIn("crowd_aggregate_absent", text)
+        self.assertIn("unresolved_or_annulled x13", text)
+
+    def test_the_python_guard_greps_for_what_the_workflow_greps_for(self):
+        """RAW_CONTENT_TOKENS transcribes the workflow's publication guard.
+
+        If the two drift apart the Python side stops being a local reproduction
+        of the CI failure, which is the entire reason it exists.
+        """
+        workflow = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            ".github", "workflows", "research_track_record.yaml",
+        )
+        with open(workflow) as handle:
+            src = handle.read()
+        line = [ln for ln in src.splitlines()
+                if "grep -qiE" in ln and "not uploading" not in ln]
+        self.assertTrue(line, "the publication guard's grep line is gone")
+        pattern = line[0]
+        for token in RAW_CONTENT_TOKENS:
+            self.assertIn(
+                token.replace(".", "\\."), pattern,
+                "{0!r} is not in the workflow's guard".format(token),
+            )
+
+    def test_a_raw_content_token_in_a_string_value_is_refused(self):
+        """Key names were already covered; a field name echoed as DATA is
+        still a field name in a world-readable file."""
+        with self.assertRaises(Exception):
+            assert_safe({"note": "see probability_of_resolution for detail"})
+        with self.assertRaises(Exception):
+            assert_safe({"note": "https://www.metaculus.com/questions/45518"})
 
     def test_unknown_probe_shape_is_not_echoed_verbatim(self):
         safe = build_safe_summary(

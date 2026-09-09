@@ -147,12 +147,79 @@ jobs:
           key: notification-state-${{ github.run_id }}
           restore-keys: |
             notification-state-
+      # POLLING LOOP, not a single shot. R8 follow-up.
+      #
+      # docs/cadence.md measured `*/5` delivering 32 min median gaps (14% of
+      # the 12 events/hour requested) and recorded the phase-shift as an
+      # UNVERIFIED mitigation to be re-measured. Re-measured 2026-09-07 over
+      # the 200 most recent runs: it did not work. Delivery has fallen to
+      #
+      #     median gap 174.6 min, 2.6% of requested, max 299 min
+      #
+      # and last night MiniBench opened two batches 5 hours apart with the bot
+      # blind in between. `*/5` is already GitHub's documented ceiling -- "the
+      # shortest interval you can run scheduled workflows is once every 5
+      # minutes" -- so asking for MORE is not a lever that exists. Events are
+      # dropped, not delayed, and nothing here can raise the delivery rate.
+      #
+      # What IS available: make each delivered run cover more wall-clock time.
+      # One event that arrives now buys POLL_WINDOW_SECONDS of real 5-minute
+      # detection instead of the ~60 seconds it used to buy.
+      #
+      # Cost is close to nothing. A poll with no new question is two discovery
+      # calls; skip_previously_forecasted_questions=True means LLM tokens are
+      # spent only when something new actually opens. The repository is
+      # public, so standard-runner minutes are free.
+      #
+      # Sizing: the window is deliberately ~= the measured median gap rather
+      # than the 6h job ceiling. That is enough for runs to hand over to one
+      # another most of the time, without turning a scheduled job into a
+      # permanently resident process, which is not what Actions is for.
+      #
+      # A poll that fails does NOT abort the window -- one bad question, or one
+      # provider outage, must not blind the bot for the remaining hours. But a
+      # window in which EVERY poll failed is a real failure and exits non-zero,
+      # so the WhatsApp failure notifier below still fires on a systemic break.
       - name: Run bot
+        # Must exceed POLL_WINDOW_SECONDS plus the longest single poll, and
+        # stay under GitHub's 6h job ceiling.
+        timeout-minutes: 215
         run: |
-          poetry run python main.py
+          set -uo pipefail
+          window="${POLL_WINDOW_SECONDS}"
+          interval="${POLL_INTERVAL_SECONDS}"
+          deadline=$(( $(date +%s) + window ))
+          polls=0
+          failures=0
+          while : ; do
+            polls=$(( polls + 1 ))
+            echo "::group::poll ${polls}"
+            if poetry run python main.py; then
+              echo "poll ${polls}: ok"
+            else
+              failures=$(( failures + 1 ))
+              echo "poll ${polls}: exited non-zero (failures=${failures})"
+            fi
+            echo "::endgroup::"
+            now=$(date +%s)
+            if [ "${now}" -ge "${deadline}" ]; then break; fi
+            remaining=$(( deadline - now ))
+            nap="${interval}"
+            if [ "${remaining}" -lt "${nap}" ]; then nap="${remaining}"; fi
+            sleep "${nap}"
+          done
+          echo "poll_window_complete polls=${polls} failures=${failures}"
+          if [ "${failures}" -eq "${polls}" ]; then
+            echo "::error::every poll in this window failed"
+            exit 1
+          fi
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
+          # 3h of coverage per delivered event, polled every 5 minutes -- the
+          # granularity the cron asks for and never gets.
+          POLL_WINDOW_SECONDS: "10800"
+          POLL_INTERVAL_SECONDS: "300"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}

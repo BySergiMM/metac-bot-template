@@ -169,7 +169,52 @@ def build_safe_summary(report: dict[str, Any]) -> dict[str, Any]:
             "mean_spot_peer": suppress_small_n(
                 scoring.get("mean_spot_peer"), scoring.get("n_scored")
             ),
-            "missing_inputs": scoring.get("missing_inputs") or {},
+            # Why questions could not be scored, as COUNTS under a CLOSED
+            # VOCABULARY of reason codes -- never the raw input names.
+            #
+            # Two independent guards refuse the literal token
+            # "probability_of_resolution" in a published artifact:
+            # assert_safe() below rejects it as a key name, and the workflow's
+            # "Refuse to publish raw data" step greps the finished file for
+            # it. Both are right to: that token names the field carrying our
+            # probability on the outcome that happened, which is a resolution
+            # leak. This diagnostic is only a COUNT of questions missing that
+            # field, so it is not the protected thing -- but rather than
+            # rename a field to slip past a grep, the artifact simply stops
+            # carrying provider-side field names at all.
+            #
+            # Mapping through _REASON_CODES is what makes that structural: an
+            # input this map does not know becomes "other", so a new scoring
+            # input added upstream can never introduce a new raw name into a
+            # world-readable file. The full breakdown stays in the CI log and
+            # in full_report.json, which never leaves RUNNER_TEMP.
+            "unscoreable_counts": _safe_reason_counts(scoring.get("missing_inputs")),
+            # Directional accuracy, binary only. Aggregate counts, so no
+            # per-question resolution is recoverable from them -- with n >= 3
+            # a hit rate constrains no individual question's outcome.
+            "n_directional": scoring.get("n_directional"),
+            "n_directional_hits": suppress_small_n(
+                scoring.get("n_directional_hits"), scoring.get("n_directional")
+            ),
+            "directional_hit_rate": suppress_small_n(
+                scoring.get("directional_hit_rate"), scoring.get("n_directional")
+            ),
+            # The trivial benchmark and the margin over it. Without these the
+            # hit rate is unreadable: 82% is excellent against a 55% base rate
+            # and worthless against an 85% one.
+            "majority_class_hit_rate": suppress_small_n(
+                scoring.get("majority_class_hit_rate"), scoring.get("n_directional")
+            ),
+            "directional_skill_margin": suppress_small_n(
+                scoring.get("directional_skill_margin"), scoring.get("n_directional")
+            ),
+            "mean_confidence_when_right": suppress_small_n(
+                scoring.get("mean_confidence_when_right"), scoring.get("n_directional_hits")
+            ),
+            "mean_confidence_when_wrong": suppress_small_n(
+                scoring.get("mean_confidence_when_wrong"),
+                (scoring.get("n_directional") or 0) - (scoring.get("n_directional_hits") or 0),
+            ),
             "by_question_type": _safe_by_type(scoring.get("by_question_type") or {}),
         },
         "validation": {
@@ -197,7 +242,12 @@ def build_safe_summary(report: dict[str, Any]) -> dict[str, Any]:
                 "within_tolerance_rate": peer_check.get("within_tolerance_rate"),
                 "tolerance": peer_check.get("tolerance"),
                 "blocked_reason": peer_check.get("blocked_reason"),
-                "missing_terms": peer_check.get("missing_terms") or [],
+                # Same closed vocabulary as unscoreable_counts: these are
+                # the raw scoring-input names, and one of them is the token
+                # both publication guards refuse.
+                "missing_terms": sorted(
+                    {_reason_code(t) for t in (peer_check.get("missing_terms") or [])}
+                ),
             },
             "inversion_diagnostic": {
                 # Counts only. The raw (score, probability) pairs would reveal
@@ -233,7 +283,7 @@ def build_safe_summary(report: dict[str, Any]) -> dict[str, Any]:
             "n_evaluable": benchmark.get("n_evaluable"),
             "n_discarded": benchmark.get("n_discarded"),
             "evaluable_rate": benchmark.get("evaluable_rate"),
-            "discard_reasons": benchmark.get("discard_reasons") or {},
+            "discard_reasons": _safe_reason_counts(benchmark.get("discard_reasons")),
             "by_type": benchmark.get("by_type") or {},
         },
         "limitations": list(dataset.get("limitations") or []),
@@ -287,6 +337,45 @@ def suppress_small_n(value: Any, n: Any, minimum: int = MIN_CELL) -> Any:
     return value
 
 
+#: Closed vocabulary for unscoreable-question reasons. Keys are the scoring
+#: input names produced by research/scorer.py; values are the only strings that
+#: may reach a published artifact. Anything unmapped becomes "other".
+_REASON_CODES = {
+    # scorer.py: spot_peer_missing / missing_inputs
+    "probability_of_resolution": "outcome_probability_absent",
+    "geometric_mean_of_other_forecasters": "crowd_aggregate_absent",
+    "spot_scoring_time": "spot_instant_underivable",
+    "resolution": "unresolved",
+    # coverage.py: benchmark discard_reasons
+    "no_probability_of_resolution": "outcome_probability_absent",
+    "unresolved_or_annulled": "unresolved_or_annulled",
+    "not_scored": "not_scored",
+}
+
+
+def _reason_code(name: Any) -> str:
+    return _REASON_CODES.get(str(name), "other")
+
+
+def _safe_reason_counts(missing: Any) -> list[dict[str, Any]]:
+    """{input_name: count} -> [{reason_code, n_questions}], sorted, vocabulary
+    closed. Counts are aggregates over the whole dataset and constrain no
+    individual question, so they are not suppressed by n."""
+    if not isinstance(missing, dict):
+        return []
+    totals: dict[str, int] = {}
+    for name, count in missing.items():
+        code = _reason_code(name)
+        try:
+            totals[code] = totals.get(code, 0) + int(count)
+        except (TypeError, ValueError):
+            continue
+    return [
+        {"reason_code": code, "n_questions": total}
+        for code, total in sorted(totals.items())
+    ]
+
+
 def _safe_by_type(by_type: dict[str, Any]) -> dict[str, Any]:
     return {
         qtype: {
@@ -316,8 +405,24 @@ def _safe_forfeit(forfeit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Tokens the workflow's "Refuse to publish raw data" step greps the finished
+#: artifact for, transcribed from research_track_record.yaml. Kept here so the
+#: Python guard is exactly as strict as the shell one and this class of bug
+#: fails in `python -m unittest` rather than three minutes into CI -- which is
+#: how runs 34109057901 and 34109534444 were both spent finding one token.
+#:
+#: Checked against string VALUES, where BANNED_KEYS only covers key names. A
+#: field name echoed as data is still a field name in a world-readable file.
+RAW_CONTENT_TOKENS = (
+    "metaculus.com/questions",
+    "resolution_criteria",
+    "probability_of_resolution",
+)
+
+
 def assert_safe(document: Any, path: str = "$") -> None:
-    """Recursively refuse banned key names and credential-shaped strings.
+    """Recursively refuse banned key names, raw-content tokens in any string,
+    and credential-shaped strings.
 
     A second line of defence: if the allowlist above is ever edited carelessly,
     this still stops the artifact from being written.
@@ -334,6 +439,14 @@ def assert_safe(document: Any, path: str = "$") -> None:
         for index, value in enumerate(document):
             assert_safe(value, "{0}[{1}]".format(path, index))
     elif isinstance(document, str):
+        lowered = document.lower()
+        for token in RAW_CONTENT_TOKENS:
+            if token in lowered:
+                raise UnsafeReportError(
+                    "raw-content token {0!r} in the string at {1}; the "
+                    "workflow's publication guard greps for exactly this and "
+                    "would refuse the artifact".format(token, path)
+                )
         if _SECRET_SHAPE.search(document) and "git_commit" not in path and "sha256" not in path:
             raise UnsafeReportError(
                 "credential-shaped string at {0}; refusing to publish".format(path)
@@ -411,8 +524,23 @@ def render_text(safe: dict[str, Any]) -> str:
         add("total spot peer               : {0}".format(fmt(sc["total_spot_peer"], ".2f")))
         add("weighted total spot peer      : {0}".format(fmt(sc["weighted_total_spot_peer"], ".2f")))
         add("mean spot peer                : {0}".format(fmt(sc["mean_spot_peer"], ".2f")))
-    if sc["missing_inputs"]:
-        add("missing inputs                : {0}".format(json.dumps(sc["missing_inputs"])))
+    if sc["unscoreable_counts"]:
+        add("unscoreable questions         : {0}".format(
+            ", ".join(
+                "{0} x{1}".format(item["reason_code"], item["n_questions"])
+                for item in sc["unscoreable_counts"]
+            )
+        ))
+    if sc.get("n_directional"):
+        rate = sc.get("directional_hit_rate")
+        margin = sc.get("directional_skill_margin")
+        add("directional hits (binary)     : {0}/{1}  {2}".format(
+            sc.get("n_directional_hits"), sc.get("n_directional"),
+            "n/a" if not isinstance(rate, (int, float)) else "{0:.1f}%".format(100 * rate),
+        ))
+        add("  vs always-majority          : {0}".format(
+            "n/a" if not isinstance(margin, (int, float))
+            else "{0:+.1f} pts".format(100 * margin)))
     if sc["by_question_type"]:
         add("")
         add("    {0:<16} {1:>5} {2:>9} {3:>16}".format("type", "n", "covered", "mean log score"))
@@ -483,7 +611,12 @@ def render_text(safe: dict[str, Any]) -> str:
     add("  evaluable / questions         : {0} / {1}  ({2})".format(
         bench["n_evaluable"], bench["n_questions"], pct(bench["evaluable_rate"])
     ))
-    add("  discard reasons               : {0}".format(json.dumps(bench["discard_reasons"])))
+    add("  discard reasons               : {0}".format(
+        ", ".join(
+            "{0} x{1}".format(item["reason_code"], item["n_questions"])
+            for item in bench["discard_reasons"]
+        ) or "none"
+    ))
     add("    {0:<16} {1:>7} {2:>9} {3:>10} {4:>10}".format(
         "type", "total", "resolved", "evaluable", "discarded"
     ))
