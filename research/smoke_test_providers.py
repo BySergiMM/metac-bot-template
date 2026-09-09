@@ -492,6 +492,14 @@ def main() -> int:
                 print("   {0:<44} {1:<6} {2}".format(
                     r.get("swept_model", "?")[:43], r.get("result", "?"),
                     r.get("error_class") or ""))
+            # Full record for anything that PASSED. "Returned JSON" is not the
+            # same claim as "honoured the schema": parsed_keys and raw are what
+            # let a reader check the model actually produced the requested
+            # {"probability": <number>} shape, which is the property the parser
+            # role depends on. A one-line OK is not evidence anyone can audit.
+            for r in swept:
+                if r.get("result") == "OK":
+                    print(json.dumps(r, indent=2, sort_keys=True))
         print("-" * 70)
 
     print("=" * 70)
