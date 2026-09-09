@@ -368,6 +368,63 @@ class ConfigurationTests(unittest.TestCase):
         finally:
             pin.ACTIVE_FALLBACKS = []
 
+    def test_the_parser_leads_with_a_funded_backend_when_groq_is_present(self):
+        """The historical primary, gpt-4o-mini, returns 402 on every call: 308
+        guaranteed failures over 2026-09-07..09, each a wasted round trip
+        before reaching a backend that works. It is demoted to LAST, not
+        deleted -- Metaculus donates OpenRouter credits, so it becomes a
+        working link again the moment the account is funded."""
+        import os
+        import unittest.mock
+        import backtest.pin_models as pin
+        with unittest.mock.patch.dict(os.environ, {"GROQ_API_KEY": "k"}):
+            self.assertEqual(pin._parser_primary(pin.DEFAULTS["parser"]),
+                             "groq/qwen/qwen3.8-27b")
+
+    def test_the_parser_primary_is_unchanged_without_groq(self):
+        """The OpenRouter-only install must keep the behaviour it has always
+        had; a missing key is a shorter chain, never a different one."""
+        import os
+        import unittest.mock
+        import backtest.pin_models as pin
+        env = {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"}
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(pin._parser_primary(pin.DEFAULTS["parser"]),
+                             pin.DEFAULTS["parser"])
+
+    def test_an_explicit_parser_override_always_wins(self):
+        """Someone who names a parser in models.txt means it, funded or not."""
+        import os
+        import unittest.mock
+        import backtest.pin_models as pin
+        with unittest.mock.patch.dict(os.environ, {"GROQ_API_KEY": "k"}):
+            self.assertEqual(pin._parser_primary("openrouter/some/other"),
+                             "openrouter/some/other")
+
+    def test_no_backend_appears_twice_in_the_parser_chain(self):
+        """The primary leads the chain in _chain_expr. Listing it again in the
+        fallbacks would burn two attempts on one provider -- and when that
+        provider is the dead one, two guaranteed failures."""
+        import os
+        import unittest.mock
+        import backtest.pin_models as pin
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"GROQ_API_KEY": "k", "GEMINI_API_KEY": "g", "OPENROUTER_API_KEY": "o"},
+        ):
+            pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
+            pin.ACTIVE_PARSER_EXTRA = list(pin.PARSER_EXTRA_CHAIN)
+            try:
+                primary = pin._parser_primary(pin.DEFAULTS["parser"])
+                chain = [primary] + pin._fallbacks_for("parser")
+                self.assertEqual(len(chain), len(set(chain)), chain)
+                self.assertEqual(chain[0], "groq/qwen/qwen3.8-27b")
+                # the dead paid model is present but LAST
+                self.assertEqual(chain[-1], "openrouter/openai/gpt-4o-mini")
+            finally:
+                pin.ACTIVE_FALLBACKS = []
+                pin.ACTIVE_PARSER_EXTRA = []
+
     def test_parser_stays_unwrapped_when_no_fallback_can_parse(self):
         """Groq's gpt-oss-120b alone must not become the parser's fallback:
         prose where JSON is required would discard the prediction the fallback

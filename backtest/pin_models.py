@@ -184,7 +184,42 @@ STRUCTURED_OUTPUT_CAPABLE = {
 # as if it settled the question.
 PARSER_EXTRA_CHAIN = [
     ("groq/qwen/qwen3.8-27b", "GROQ_API_KEY"),
+    # The historical parser primary, DEMOTED to last (see _parser_primary).
+    # It is a paid model on an account with no credit, so every call returns
+    # 402 -- 308 guaranteed failures over 2026-09-07..09, each one a wasted
+    # round trip before the chain reached a backend that works. Kept rather
+    # than deleted because it is genuinely capable and Metaculus donates
+    # OpenRouter credits to tournament participants: the day that form is
+    # filled in, this becomes a working link again with no code change.
+    ("openrouter/openai/gpt-4o-mini", "OPENROUTER_API_KEY"),
 ]
+
+
+def _parser_primary(configured: str) -> str:
+    """Which backend the parser TRIES FIRST.
+
+    `configured` is whatever the caller resolved -- DEFAULTS, or a models.txt
+    override. An explicit override always wins: someone who names a parser in
+    models.txt means it.
+
+    Otherwise, when GROQ_API_KEY is present, the default parser primary becomes
+    the swept-and-verified Groq model instead of gpt-4o-mini. Two reasons, both
+    measured:
+
+      * gpt-4o-mini returns 402 on every call (no credit), so leading with it
+        buys a guaranteed failure on the way to a backend that works;
+      * it takes parser load OFF Gemini, which served 382 of 431 successful
+        calls over two days on ONE 15 RPM credential. Gemini saturating is
+        exactly what discarded five predictions on 2026-09-08.
+
+    With no GROQ_API_KEY this returns `configured` unchanged, so the
+    OpenRouter-only install keeps the behaviour it has always had.
+    """
+    if configured != DEFAULTS["parser"]:
+        return configured
+    if os.getenv("GROQ_API_KEY"):
+        return "groq/qwen/qwen3.8-27b"
+    return configured
 
 # forecasting-tools only applies a custom timeout to roles given as GeneralLlm;
 # a bare model string silently gets its 60s default. The free tier queues past
@@ -333,7 +368,10 @@ def _fallbacks_for(role: str) -> list[str]:
     for model, _env_var in ACTIVE_PARSER_EXTRA:
         if model not in capable:
             capable.append(model)
-    return capable
+    # The primary leads the chain in _chain_expr; listing it again here would
+    # emit the same backend twice and burn two attempts on one dead provider.
+    primary = _parser_primary(DEFAULTS["parser"])
+    return [m for m in capable if m != primary]
 
 
 GEMINI_MODEL = "gemini/gemini-3.5-flash-lite"
@@ -502,6 +540,8 @@ TEMPLATE_FOOTER = '''        },
 
 
 def build_block(models: dict[str, str]) -> str:
+    models = dict(models)
+    models["parser"] = _parser_primary(models["parser"])
     lines = [TEMPLATE_HEADER.rstrip("\n")]
     for role in ("default", "summarizer", "researcher", "parser"):
         if role == "parser" and not ACTIVE_FALLBACKS:
@@ -909,7 +949,14 @@ def selftest() -> None:
         )
         assert BALANCED_IMPORT_LINE in with_fb if n_ens > 1 else True
         if parser_fallbacks:
-            assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["parser"] in with_fb
+            # The parser leads with whatever _parser_primary resolved, which is
+            # the funded backend when GROQ_API_KEY is present and the historical
+            # default otherwise. Asserting DEFAULTS["parser"] here would pin the
+            # old shape and fail exactly in the configuration production uses.
+            parser_primary = _parser_primary(DEFAULTS["parser"])
+            assert "FallbackLlm([\n                GeneralLlm(model=\"" + parser_primary in with_fb, (
+                "parser chain does not lead with {0}".format(parser_primary)
+            )
         ast.parse(with_fb)
         _eval_llms_dict(with_fb, ACTIVE_FALLBACKS, DEFAULTS)  # real dict, correct backend count per role
         assert patch(with_fb, DEFAULTS) == with_fb  # idempotent with fallback active too
