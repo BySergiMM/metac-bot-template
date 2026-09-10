@@ -202,6 +202,10 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          # The sponsored key restricts which providers it may reach, so its
+          # catalogue is now something to MEASURE, not inherit. Read-only here:
+          # this step lists models and sends one tiny completion.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           # Candidate provider under evaluation. Scoped to this smoke-test step
           # only: it is deliberately NOT passed to the fetch/analyse steps, and
           # NOT to any forecasting workflow, so an untested provider cannot
