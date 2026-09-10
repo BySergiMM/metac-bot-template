@@ -123,6 +123,13 @@ jobs:
           # assertion in tests/test_production_invariants.py.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # Gates the chain at PATCH time. pin_models reads os.environ here to
+          # decide which backends to write into the llms= block, so a key that
+          # reaches "Run bot" but not this step produces a SHORTER chain with
+          # no error: claude-haiku-4.5 silently vanished from the ensemble and
+          # from the parser in production while every E2E passed, because
+          # test_bot.yaml had this key and these two did not.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       # notifications/state.json is the ONLY thing the WhatsApp notifier
       # needs to survive between runs (which events were already sent -- see
       # notifications/state.py's module docstring for why that is the sole

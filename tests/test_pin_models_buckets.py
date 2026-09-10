@@ -7,13 +7,52 @@ controlled environment rather than mutating module state in place.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import os
 import unittest
 
 
+@contextlib.contextmanager
+def pinned_env(**env):
+    """Reload pin_models AND hold the credential environment for the whole
+    block, so call-time os.environ reads see the simulated set too."""
+    managed = [
+        "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY",
+        "GROQ_API_KEY", "OPENROUTER_API_KEY",
+    ]
+    saved = {name: os.environ.pop(name, None) for name in managed}
+    os.environ.update(env)
+    try:
+        import backtest.pin_models as pm
+
+        yield importlib.reload(pm)
+    finally:
+        for name in managed:
+            os.environ.pop(name, None)
+            if saved[name] is not None:
+                os.environ[name] = saved[name]
+        import backtest.pin_models as pm
+
+        importlib.reload(pm)
+
+
 def load(**env):
-    """Reload pin_models with exactly the given credential environment."""
+    """Reload pin_models with exactly the given credential environment.
+
+    HAZARD, and it has bitten once. The environment is applied only for the
+    duration of the IMPORT and restored before this function returns. Anything
+    the module resolves at import time -- ACTIVE_FALLBACKS, ACTIVE_PARSER_EXTRA
+    -- is captured correctly. Anything that reads os.environ at CALL time sees
+    the real environment instead, so a test using `load` to simulate a
+    credential set silently exercises a different one.
+
+    That is how the crash of 2026-09-10 reached production: _parser_primary
+    read os.environ when called, `test_one_credential` restored the env before
+    calling selftest(), the selftest passed in CI, and the identical
+    combination failed on the first scheduled run. Use `pinned_env` for
+    anything that must hold the environment across a CALL.
+    """
     saved = {}
     managed = [
         "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY",
@@ -200,11 +239,32 @@ class SelftestAcrossBucketCountsTests(unittest.TestCase):
     """
 
     def _run_selftest(self, **env):
-        pm = load(**env)
-        pm.selftest()  # raises AssertionError on failure
+        # pinned_env, not load: selftest() is a CALL, and the environment has
+        # to still be in place while it runs. With `load` the env was restored
+        # first, which is exactly how a real crash passed CI here.
+        with pinned_env(**env) as pm:
+            pm.selftest()  # raises AssertionError on failure
 
     def test_no_credentials(self):
         self._run_selftest()
+
+    def test_the_production_pin_step_combination(self):
+        """The exact credential set the scoring workflows give the pin step.
+
+        Named explicitly because it is the one that broke: on 2026-09-10 three
+        consecutive scheduled runs died here (34417432835, 34425442320,
+        34445843668) in a combination the matrix already covered on paper --
+        but `load` restored the environment before selftest() ran, so the
+        simulated set was never the one under test. With pinned_env it is."""
+        self._run_selftest(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+
+    def test_the_production_run_step_combination(self):
+        """Every provider key present, as the Run bot step sees them."""
+        self._run_selftest(GEMINI_API_KEY="a", GROQ_API_KEY="g",
+                           OPENROUTER_API_KEY="o")
+
+    def test_openrouter_only(self):
+        self._run_selftest(OPENROUTER_API_KEY="o")
 
     def test_one_credential(self):
         self._run_selftest(GEMINI_API_KEY="a", GROQ_API_KEY="g")
