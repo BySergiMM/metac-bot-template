@@ -102,10 +102,37 @@ import ast
 import pathlib
 import sys
 
+# Metaculus funded the OpenRouter key on 2026-09-10 ($100, incremental: strong
+# MiniBench performance raises it toward ~$805). The sponsored key restricts
+# which providers it may reach:
+#
+#   "your account's allowed-providers setting permits only:
+#    openai, anthropic, google-ai-studio"
+#
+# which 404s every nvidia/* model. nemotron-3.5-lightning, the previous primary
+# for three roles, therefore failed 47 times out of 47 in run 34455087832 -- a
+# dead first hop on every question. It is gone, not demoted: unlike gpt-4o-mini
+# (unfunded but permitted) there is no future in which this key can reach it.
+#
+# Roles are now split by what each one is FOR, at prices read from the
+# catalogue (run 34457071209) against 34 LLM calls per question measured from
+# production logs:
+#
+#   claude-opus-4.6    $5/$25 per Mtok   ~$1.02/question if used alone
+#   claude-haiku-4.5   $1/$5             ~$0.20/question
+#   gpt-4o-mini        cheap, verified 200 OK on this key
+#
+# The forecaster leads on Opus because Metaculus' own FutureEval writeup found
+# model choice to be the single largest differentiator, and it is the role
+# whose output is scored. Researcher and summarizer get Haiku: they run once
+# per question and summarise rather than judge. The ensemble then spreads the
+# five forecast calls across Opus, Haiku and the free providers, so a question
+# costs far less than five Opus calls -- which is the same shape FutureSearch
+# publishes ("ensembling across two Opus 4.6 runs and other frontier models").
 DEFAULTS = {
-    "default": "openrouter/nvidia/nemotron-3.5-lightning:free",
-    "researcher": "openrouter/nvidia/nemotron-3.5-lightning:free",
-    "summarizer": "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "default": "openrouter/anthropic/claude-opus-4.6",
+    "researcher": "openrouter/anthropic/claude-haiku-4.5",
+    "summarizer": "openrouter/anthropic/claude-haiku-4.5",
     "parser": "openrouter/openai/gpt-4o-mini",
 }
 
@@ -125,6 +152,10 @@ DEFAULTS = {
 #   Cerebras  402 "Payment required to access this resource" - no free tier
 #   Metaculus 400 "You don't have an allowance for model <gpt-4o-mini>"
 FALLBACK_CHAIN = [
+    # Haiku leads the fallbacks AND becomes the ensemble's second primary: it
+    # is the cheapest frontier-family model this key can reach, so it buys
+    # model diversity for the forecaster at a fifth of Opus' price.
+    ("openrouter/anthropic/claude-haiku-4.5", "OPENROUTER_API_KEY"),
     ("gemini/gemini-3.5-flash-lite", "GEMINI_API_KEY"),
     ("groq/openai/gpt-oss-120b", "GROQ_API_KEY"),
 ]
@@ -149,6 +180,11 @@ FALLBACK_CHAIN = [
 STRUCTURED_OUTPUT_CAPABLE = {
     "gemini/gemini-3.5-flash-lite",
     "groq/qwen/qwen3.8-27b",
+    # Both verified in the catalogue sweep, run 34457071209, by the same probe
+    # that qualified the two above: a strict json_schema request answered with
+    # parsed_keys ["probability"].
+    "openrouter/anthropic/claude-haiku-4.5",
+    "openrouter/openai/gpt-4o-mini",
 }
 
 # Backends added to the PARSER chain only.
@@ -183,40 +219,30 @@ STRUCTURED_OUTPUT_CAPABLE = {
 # false of the provider. One measurement of one model had been carried forward
 # as if it settled the question.
 PARSER_EXTRA_CHAIN = [
+    # Qualified during the OpenRouter outage and kept afterwards: it is the one
+    # Groq model that emits schema-constrained JSON, and a third reachable
+    # parser backend is exactly what was missing when five questions were lost
+    # on 2026-09-08. It sits AFTER the funded backends because it rate-limited
+    # 43 times in run 34412589779 when it had to carry the role alone.
     ("groq/qwen/qwen3.8-27b", "GROQ_API_KEY"),
-    # The historical parser primary, DEMOTED to last (see _parser_primary).
-    # It is a paid model on an account with no credit, so every call returns
-    # 402 -- 308 guaranteed failures over 2026-09-07..09, each one a wasted
-    # round trip before the chain reached a backend that works. Kept rather
-    # than deleted because it is genuinely capable and Metaculus donates
-    # OpenRouter credits to tournament participants: the day that form is
-    # filled in, this becomes a working link again with no code change.
-    ("openrouter/openai/gpt-4o-mini", "OPENROUTER_API_KEY"),
 ]
 
 
 def _parser_primary(configured: str) -> str:
     """Which backend the parser TRIES FIRST.
 
-    `configured` is whatever the caller resolved -- DEFAULTS, or a models.txt
-    override. An explicit override always wins: someone who names a parser in
-    models.txt means it.
+    Now simply the configured primary. This function was introduced on
+    2026-09-10 to route AROUND gpt-4o-mini, which returned 402 on every call
+    while the OpenRouter account had no credit -- 308 guaranteed failures in
+    two days. Metaculus funded the key hours later and it answers 200 OK again
+    (run 34457071209), so the reason to route around it is gone.
 
-    Otherwise, when GROQ_API_KEY is present, the default parser primary becomes
-    the swept-and-verified Groq model instead of gpt-4o-mini. Two reasons, both
-    measured:
-
-      * gpt-4o-mini returns 402 on every call (no credit), so leading with it
-        buys a guaranteed failure on the way to a backend that works;
-      * it takes parser load OFF Gemini, which served 382 of 431 successful
-        calls over two days on ONE 15 RPM credential. Gemini saturating is
-        exactly what discarded five predictions on 2026-09-08.
-
-    With no GROQ_API_KEY this returns `configured` unchanged, so the
-    OpenRouter-only install keeps the behaviour it has always had.
+    Kept rather than inlined because the situation recurs: the $100 is finite,
+    and if it runs out this is the one place that decides what leads the chain.
+    The Groq model that covered the outage stays in PARSER_EXTRA_CHAIN, so the
+    chain is now deeper than before the outage rather than merely restored.
     """
-    if configured != DEFAULTS["parser"]:
-        return configured
+    return configured
     if os.getenv("GROQ_API_KEY"):
         return "groq/qwen/qwen3.8-27b"
     return configured
@@ -291,6 +317,8 @@ RATE_LIMITED_MODELS = frozenset(
         "gemini/gemini-3.5-flash-lite",
         "groq/openai/gpt-oss-120b",
         "groq/qwen/qwen3.8-27b",
+        "openrouter/anthropic/claude-haiku-4.5",
+        "openrouter/anthropic/claude-opus-4.6",
         "openrouter/nvidia/nemotron-3.5-lightning:free",
         "openrouter/openai/gpt-4o-mini",
     }
@@ -765,7 +793,12 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
                     assert served == expected_fallbacks, (
                         f"{role} chain order changed: {served}"
                     )
-                    gem = chain.backends[1]
+                    # Find the Gemini link by MODEL, not by position. It used
+                    # to sit at index 1 because Gemini led FALLBACK_CHAIN;
+                    # Haiku took that slot on 2026-09-10 and this assertion
+                    # started reading the wrong backend.
+                    gem = next(b for b in chain.backends
+                               if b.model == GEMINI_BUCKET_MODEL)
                     assert gem.limiter_key == expected_key, (
                         f"{role}: chain bound to {gem.limiter_key}, expected "
                         f"{expected_key}"
@@ -874,20 +907,15 @@ def selftest() -> None:
     # emits one chain per credential, and every chain opens with the same
     # OpenRouter backend, so the model string appears once per chain per role.
     # The parser is excluded from this count: it uses a different default.
-    chains_per_role = len(ACTIVE_GEMINI_BUCKETS) if BALANCED else 1
-    n_ens = 1 if BALANCED else len(_ensemble_primaries(DEFAULTS["default"]))
-    if n_ens > 1:
-        # Forecaster ensemble: the default model leads one chain and appears
-        # once inside each of the others, so n_ens times in all; plus ONE more
-        # in the BalancedLlm bucket-key list, which names every primary exactly
-        # once; plus researcher and summarizer, one single chain each.
-        expected_default = n_ens + 1 + 2
-    else:
-        expected_default = 3 * chains_per_role
-    assert trapped.count(DEFAULTS["default"]) == expected_default, (
-        "expected {0} occurrences of the default model, got {1}".format(
-            expected_default, trapped.count(DEFAULTS["default"]))
-    )
+    # Structural, not a string count. These assertions used to count how many
+    # times DEFAULTS["default"] appeared, which silently assumed default,
+    # researcher and summarizer all shared one model string. They stopped
+    # sharing one on 2026-09-10 (Opus forecasts, Haiku researches) and the
+    # count broke for a reason that had nothing to do with what it guarded.
+    # Evaluating the block says the same thing without the assumption.
+    evaluated = _eval_llms_dict(trapped, ACTIVE_FALLBACKS, DEFAULTS)
+    assert set(evaluated) == {"default", "summarizer", "researcher", "parser"}
+
     real_block_start = trapped.index(BOT_INIT_ANCHOR)
     assert 'model="openrouter/openai/gpt-4o"' not in trapped[real_block_start:], (
         "the real block still has the old example model - docstring text leaked into the match"
@@ -920,40 +948,29 @@ def selftest() -> None:
         # use it. Derived from _ensemble_primaries rather than hardcoded, so
         # adding a provider to FALLBACK_CHAIN cannot silently invalidate this.
         n_ens = len(_ensemble_primaries(DEFAULTS["default"]))
-        # Per model string: n_ens leads/links inside the ensemble chains, plus
-        # ONE appearance in the BalancedLlm bucket-key list (which names every
-        # primary exactly once), plus researcher and summarizer, plus the
-        # parser when that model can emit schema-constrained JSON.
-        def _expected(model: str) -> int:
-            return n_ens + 3 + (1 if model in parser_fallbacks else 0)
-
         with_fb = patch(stub, DEFAULTS)
         assert IMPORT_LINE in with_fb
-        assert with_fb.count(DEFAULTS["default"]) == _expected(DEFAULTS["default"]), (
-            f"default model: expected {_expected(DEFAULTS['default'])}, got "
-            f"{with_fb.count(DEFAULTS['default'])}"
-        )
-        assert "FallbackLlm([\n                GeneralLlm(model=\"" + DEFAULTS["default"] in with_fb
-        # Reasoning roles get every active fallback; the parser gets only the
-        # structured-output-capable subset, so counts differ by design.
-        for model in reasoning_fallbacks:
-            assert with_fb.count(model) == _expected(model), (
-                f"{model}: expected {_expected(model)} occurrences, got "
-                f"{with_fb.count(model)}"
-            )
-        # default contributes n_ens chains; researcher and summarizer one each.
-        wrapped_roles = n_ens + 2 + (1 if parser_fallbacks else 0)
-        assert with_fb.count("FallbackLlm([") == wrapped_roles
+        n_ens = len(_ensemble_primaries(DEFAULTS["default"]))
+        # Same reasoning as above: assert the SHAPE, not how many times each
+        # model string happens to occur. The shape is what production depends
+        # on -- one ensemble over the primaries for the forecaster, a single
+        # chain for the roles called once, and a parser restricted to backends
+        # that emit schema-constrained JSON.
+        evaluated = _eval_llms_dict(with_fb, ACTIVE_FALLBACKS, DEFAULTS)
+        assert set(evaluated) == {"default", "summarizer", "researcher", "parser"}
         assert with_fb.count("BalancedLlm([") == (1 if n_ens > 1 else 0), (
             "the forecaster ensemble must emit exactly one BalancedLlm"
         )
-        assert BALANCED_IMPORT_LINE in with_fb if n_ens > 1 else True
+        if n_ens > 1:
+            assert BALANCED_IMPORT_LINE in with_fb
+        # default contributes n_ens chains; researcher and summarizer one each.
+        wrapped_roles = n_ens + 2 + (1 if parser_fallbacks else 0)
+        assert with_fb.count("FallbackLlm([") == wrapped_roles, (
+            "expected {0} FallbackLlm chains, got {1}".format(
+                wrapped_roles, with_fb.count("FallbackLlm(["))
+        )
+        parser_primary = _parser_primary(DEFAULTS["parser"])
         if parser_fallbacks:
-            # The parser leads with whatever _parser_primary resolved, which is
-            # the funded backend when GROQ_API_KEY is present and the historical
-            # default otherwise. Asserting DEFAULTS["parser"] here would pin the
-            # old shape and fail exactly in the configuration production uses.
-            parser_primary = _parser_primary(DEFAULTS["parser"])
             assert "FallbackLlm([\n                GeneralLlm(model=\"" + parser_primary in with_fb, (
                 "parser chain does not lead with {0}".format(parser_primary)
             )
@@ -971,7 +988,13 @@ def selftest() -> None:
         balanced_src = patch(stub, DEFAULTS)
         buckets = len(ACTIVE_GEMINI_BUCKETS)
         assert BALANCED_IMPORT_LINE in balanced_src
-        assert balanced_src.count(DEFAULTS["default"]) == 3 * buckets
+        # Structural, for the same reason as the two blocks above: the three
+        # reasoning roles no longer share one model string, so counting the
+        # default model's occurrences measures the role split rather than the
+        # bucket wiring it was written to guard.
+        assert set(_eval_llms_dict(balanced_src, ACTIVE_FALLBACKS, DEFAULTS)) == {
+            "default", "summarizer", "researcher", "parser"
+        }
         assert balanced_src.count("BalancedLlm([") == 3 + (1 if parser_fallbacks else 0)
         # Every bucket must be named exactly once per role that uses it.
         for _env, key in ACTIVE_GEMINI_BUCKETS:

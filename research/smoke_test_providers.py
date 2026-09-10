@@ -119,6 +119,26 @@ ROUTES = [
         },
     },
     {
+        # Added 2026-09-10, when the excluded-on-purpose note in main() stopped
+        # being true. Metaculus donates OpenRouter credits to participants, and
+        # the SPONSORED key carries an allowed-providers restriction a free key
+        # does not:
+        #
+        #   "your account's allowed-providers setting permits only:
+        #    openai, anthropic, google-ai-studio"
+        #
+        # which 404s every nvidia/* model -- including the one the reasoning
+        # roles lead with. The catalogue has to be re-read against the real key
+        # rather than inherited from how the free tier used to behave.
+        "label": "OpenRouter (sponsored key)",
+        "env_candidates": ["OPENROUTER_API_KEY"],
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "auth_scheme": "Bearer",
+        "http_model": "openai/gpt-4o-mini",
+        "litellm_model": "openrouter/openai/gpt-4o-mini",
+        "litellm_extra": {},
+    },
+    {
         # NOT a litellm provider. Verified: "metaculus" is absent from litellm's
         # LlmProviders enum, so `model="metaculus/..."` is NOT invocable.
         # forecasting-tools implements the prefix itself (general_llm.py:169-215):
@@ -297,6 +317,7 @@ MODEL_LIST_URLS = {
     "Cerebras": "https://api.cerebras.ai/v1/models",
     "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai/models",
     "Metaculus LLM proxy": "https://llm-proxy.metaculus.com/proxy/openai/v1/models",
+    "OpenRouter (sponsored key)": "https://openrouter.ai/api/v1/models",
     "Alibaba DashScope (intl)": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
     "Alibaba DashScope (mainland)": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
 }
@@ -321,8 +342,30 @@ def list_models(route: dict, timeout: int = 30) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8", "replace"))
-        ids = sorted(m.get("id", "?") for m in (data.get("data") or []))
+        entries = data.get("data") or []
+        ids = sorted(m.get("id", "?") for m in entries)
         out.update({"result": "OK", "n_models": len(ids), "models": ids[:40]})
+        # Pricing, where the provider publishes it. Picking a model on a fixed
+        # budget is a cost question as much as a capability one, and the
+        # per-token prices are right here in the catalogue -- reading them
+        # beats carrying a price table in someone's head, which is exactly how
+        # three of three earlier model guesses turned out to be wrong.
+        priced = []
+        for entry in entries:
+            pricing = entry.get("pricing") or {}
+            try:
+                cost_in = float(pricing.get("prompt"))
+                cost_out = float(pricing.get("completion"))
+            except (TypeError, ValueError):
+                continue
+            priced.append({
+                "id": entry.get("id", "?"),
+                "usd_per_mtok_in": round(cost_in * 1_000_000, 3),
+                "usd_per_mtok_out": round(cost_out * 1_000_000, 3),
+            })
+        if priced:
+            out["n_priced"] = len(priced)
+            out["pricing"] = sorted(priced, key=lambda e: e["id"])
     except urllib.error.HTTPError as exc:
         body = ""
         try:
@@ -458,8 +501,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print("Excluded on purpose: OpenRouter (known good, would burn free quota), "
-          "xAI/Grok (paid, target is EUR 0)\n")
+    print("Excluded on purpose: xAI/Grok (paid, no free tier).\n"
+          "OpenRouter is now INCLUDED: the sponsored key restricts which\n"
+          "providers it may reach, so its catalogue must be measured.\n")
     print("credential presence (names only, values never printed):")
     for name in sorted({n for r in ROUTES for n in r["env_candidates"]}):
         present = bool((os.environ.get(name) or "").strip())

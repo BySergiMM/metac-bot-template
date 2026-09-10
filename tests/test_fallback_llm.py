@@ -302,10 +302,18 @@ class ConfigurationTests(unittest.TestCase):
     """Only smoke-tested providers may appear in the chain."""
 
     def test_chain_contains_only_verified_models(self):
+        """Every fallback must have passed a real completion in a smoke-test
+        run. Asserted as membership of a verified set rather than as an exact
+        list, so adding a measured provider does not fail a test that was
+        guarding provenance, not ordering."""
         import backtest.pin_models as pin
-        models = [m for m, _env in pin.FALLBACK_CHAIN]
-        self.assertEqual(models, ["gemini/gemini-3.5-flash-lite",
-                                  "groq/openai/gpt-oss-120b"])
+        verified = {
+            "gemini/gemini-3.5-flash-lite",        # run 32293364075
+            "groq/openai/gpt-oss-120b",            # run 32293364075
+            "openrouter/anthropic/claude-haiku-4.5",  # run 34457071209
+        }
+        for model, _env in pin.FALLBACK_CHAIN:
+            self.assertIn(model, verified, model + " was never smoke-tested")
 
     def test_unverified_providers_are_absent(self):
         import backtest.pin_models as pin
@@ -315,115 +323,92 @@ class ConfigurationTests(unittest.TestCase):
                              "{0} did not pass the smoke test".format(excluded))
 
 
-    def test_parser_only_gets_backends_that_can_emit_structured_json(self):
-        """Measured, not assumed. Both entries earned their place by returning
-        {"probability": 0.42} to a strict json_schema request:
-        gemini-3.5-flash-lite in run 32293364075, groq/qwen/qwen3.8-27b in the
-        catalogue sweep 34409492553."""
-        import backtest.pin_models as pin
-        self.assertEqual(
-            pin.STRUCTURED_OUTPUT_CAPABLE,
-            {"gemini/gemini-3.5-flash-lite", "groq/qwen/qwen3.8-27b"},
-        )
-        pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
-        pin.ACTIVE_PARSER_EXTRA = []
-        try:
-            self.assertEqual(pin._fallbacks_for("parser"), ["gemini/gemini-3.5-flash-lite"])
-            self.assertEqual(pin._fallbacks_for("default"),
-                             ["gemini/gemini-3.5-flash-lite", "groq/openai/gpt-oss-120b"])
-        finally:
-            pin.ACTIVE_FALLBACKS = []
-
-    def test_the_parser_extra_deepens_only_the_parser(self):
-        """The parser lost five questions on 2026-09-08 because its chain had
-        one reachable backend. The extra must fix that WITHOUT reshaping the
-        forecaster ensemble, which is decided by ACTIVE_FALLBACKS alone."""
+    def test_every_parser_backend_can_emit_structured_json(self):
+        """The property that matters, stated once. structure_output() asks for
+        a JSON schema and discards the prediction when it does not get one, so
+        a parser backend that answers in prose turns a survived outage into a
+        lost forecast. Every member of the chain -- primary included -- must be
+        one the smoke test qualified."""
         import backtest.pin_models as pin
         pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
         pin.ACTIVE_PARSER_EXTRA = list(pin.PARSER_EXTRA_CHAIN)
         try:
-            self.assertEqual(
-                pin._fallbacks_for("parser"),
-                ["gemini/gemini-3.5-flash-lite", "groq/qwen/qwen3.8-27b"],
+            primary = pin._parser_primary(pin.DEFAULTS["parser"])
+            chain = [primary] + pin._fallbacks_for("parser")
+            for model in chain:
+                self.assertIn(model, pin.STRUCTURED_OUTPUT_CAPABLE, model)
+        finally:
+            pin.ACTIVE_FALLBACKS = []
+            pin.ACTIVE_PARSER_EXTRA = []
+
+    def test_the_parser_chain_has_no_duplicates_and_leads_with_the_primary(self):
+        """The primary leads in _chain_expr; repeating it in the fallbacks
+        would burn two attempts on one provider."""
+        import backtest.pin_models as pin
+        pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
+        pin.ACTIVE_PARSER_EXTRA = list(pin.PARSER_EXTRA_CHAIN)
+        try:
+            primary = pin._parser_primary(pin.DEFAULTS["parser"])
+            chain = [primary] + pin._fallbacks_for("parser")
+            self.assertEqual(chain[0], primary)
+            self.assertEqual(len(chain), len(set(chain)), chain)
+            self.assertGreaterEqual(
+                len(chain), 3,
+                "the parser lost five questions on 2026-09-08 with an effective "
+                "depth of one; it must stay deeper than that",
             )
-            # unchanged: the ensemble still sees exactly the shared chain
-            self.assertEqual(pin._fallbacks_for("default"),
-                             ["gemini/gemini-3.5-flash-lite", "groq/openai/gpt-oss-120b"])
-            self.assertEqual(pin._ensemble_primaries(pin.DEFAULTS["default"]),
-                             [pin.DEFAULTS["default"], "gemini/gemini-3.5-flash-lite",
-                              "groq/openai/gpt-oss-120b"])
+        finally:
+            pin.ACTIVE_FALLBACKS = []
+            pin.ACTIVE_PARSER_EXTRA = []
+
+    def test_the_parser_extra_deepens_only_the_parser(self):
+        """PARSER_EXTRA_CHAIN must not leak into the forecaster ensemble, whose
+        primaries come from ACTIVE_FALLBACKS alone. Putting a parser backend in
+        the shared chain would silently add a fifth ensemble model."""
+        import backtest.pin_models as pin
+        pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
+        try:
+            pin.ACTIVE_PARSER_EXTRA = []
+            without = pin._ensemble_primaries(pin.DEFAULTS["default"])
+            pin.ACTIVE_PARSER_EXTRA = list(pin.PARSER_EXTRA_CHAIN)
+            with_extra = pin._ensemble_primaries(pin.DEFAULTS["default"])
+            self.assertEqual(without, with_extra)
+            for model, _env in pin.PARSER_EXTRA_CHAIN:
+                self.assertNotIn(model, with_extra)
         finally:
             pin.ACTIVE_FALLBACKS = []
             pin.ACTIVE_PARSER_EXTRA = []
 
     def test_the_parser_extra_contributes_nothing_without_its_credential(self):
         """Resolved at import time from os.environ, exactly like
-        ACTIVE_FALLBACKS -- so an absent key is a shorter chain, never an
-        error, and never a backend litellm cannot authenticate."""
+        ACTIVE_FALLBACKS -- an absent key is a shorter chain, never a backend
+        litellm cannot authenticate."""
         import backtest.pin_models as pin
         pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
         pin.ACTIVE_PARSER_EXTRA = []
         try:
-            self.assertNotIn("groq/qwen/qwen3.8-27b", pin._fallbacks_for("parser"))
+            for model, _env in pin.PARSER_EXTRA_CHAIN:
+                self.assertNotIn(model, pin._fallbacks_for("parser"))
         finally:
             pin.ACTIVE_FALLBACKS = []
 
-    def test_the_parser_leads_with_a_funded_backend_when_groq_is_present(self):
-        """The historical primary, gpt-4o-mini, returns 402 on every call: 308
-        guaranteed failures over 2026-09-07..09, each a wasted round trip
-        before reaching a backend that works. It is demoted to LAST, not
-        deleted -- Metaculus donates OpenRouter credits, so it becomes a
-        working link again the moment the account is funded."""
-        import os
-        import unittest.mock
+    def test_no_reasoning_role_leads_with_an_unreachable_provider(self):
+        """The sponsored OpenRouter key permits only openai, anthropic and
+        google-ai-studio. nvidia/* 404s on every call, which is how three roles
+        came to lead with a dead backend (run 34455087832, 47 failures / 0
+        successes). Nothing in the pinned configuration may name that provider
+        again."""
         import backtest.pin_models as pin
-        with unittest.mock.patch.dict(os.environ, {"GROQ_API_KEY": "k"}):
-            self.assertEqual(pin._parser_primary(pin.DEFAULTS["parser"]),
-                             "groq/qwen/qwen3.8-27b")
-
-    def test_the_parser_primary_is_unchanged_without_groq(self):
-        """The OpenRouter-only install must keep the behaviour it has always
-        had; a missing key is a shorter chain, never a different one."""
-        import os
-        import unittest.mock
-        import backtest.pin_models as pin
-        env = {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"}
-        with unittest.mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(pin._parser_primary(pin.DEFAULTS["parser"]),
-                             pin.DEFAULTS["parser"])
-
-    def test_an_explicit_parser_override_always_wins(self):
-        """Someone who names a parser in models.txt means it, funded or not."""
-        import os
-        import unittest.mock
-        import backtest.pin_models as pin
-        with unittest.mock.patch.dict(os.environ, {"GROQ_API_KEY": "k"}):
-            self.assertEqual(pin._parser_primary("openrouter/some/other"),
-                             "openrouter/some/other")
-
-    def test_no_backend_appears_twice_in_the_parser_chain(self):
-        """The primary leads the chain in _chain_expr. Listing it again in the
-        fallbacks would burn two attempts on one provider -- and when that
-        provider is the dead one, two guaranteed failures."""
-        import os
-        import unittest.mock
-        import backtest.pin_models as pin
-        with unittest.mock.patch.dict(
-            os.environ,
-            {"GROQ_API_KEY": "k", "GEMINI_API_KEY": "g", "OPENROUTER_API_KEY": "o"},
-        ):
-            pin.ACTIVE_FALLBACKS = list(pin.FALLBACK_CHAIN)
-            pin.ACTIVE_PARSER_EXTRA = list(pin.PARSER_EXTRA_CHAIN)
-            try:
-                primary = pin._parser_primary(pin.DEFAULTS["parser"])
-                chain = [primary] + pin._fallbacks_for("parser")
-                self.assertEqual(len(chain), len(set(chain)), chain)
-                self.assertEqual(chain[0], "groq/qwen/qwen3.8-27b")
-                # the dead paid model is present but LAST
-                self.assertEqual(chain[-1], "openrouter/openai/gpt-4o-mini")
-            finally:
-                pin.ACTIVE_FALLBACKS = []
-                pin.ACTIVE_PARSER_EXTRA = []
+        configured = list(pin.DEFAULTS.values())
+        configured += [m for m, _e in pin.FALLBACK_CHAIN]
+        configured += [m for m, _e in pin.PARSER_EXTRA_CHAIN]
+        for model in configured:
+            if model.startswith("openrouter/"):
+                provider = model.split("/")[1]
+                self.assertIn(
+                    provider, {"openai", "anthropic", "google"},
+                    "{0} is not reachable by the sponsored key".format(model),
+                )
 
     def test_parser_stays_unwrapped_when_no_fallback_can_parse(self):
         """Groq's gpt-oss-120b alone must not become the parser's fallback:
