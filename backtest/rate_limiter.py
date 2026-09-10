@@ -133,6 +133,14 @@ DEFAULT_LIMITS: dict[str, ProviderLimits] = {
     # per-minute meters, not to slow down what already works.
     "openrouter/nvidia/nemotron-3.5-lightning:free": ProviderLimits(),
     "openrouter/openai/gpt-4o-mini": ProviderLimits(),
+    # Sponsored-key models. Left unthrottled like the other OpenRouter entries:
+    # the observed cap there is per DAY and per credit balance, not per minute,
+    # so a per-minute limiter would only add latency without preventing the
+    # failure mode that actually occurs. Registered rather than omitted because
+    # limits_for() hands an UNKNOWN key an unthrottled limiter too -- and an
+    # unregistered key looks controlled while enforcing nothing.
+    "openrouter/anthropic/claude-opus-4.6": ProviderLimits(),
+    "openrouter/anthropic/claude-haiku-4.5": ProviderLimits(),
 }
 
 # Buckets 1..3 carry the SAME measured quota as bucket 0. Registering them here
