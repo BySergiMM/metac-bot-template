@@ -562,7 +562,21 @@ class WorkflowInvariants(unittest.TestCase):
         Asserted per workflow that runs main.py, over the provider keys that
         actually gate the chain.
         """
-        chain_keys = ("GEMINI_API_KEY", "GROQ_API_KEY")
+        # DERIVED from the code, not typed here. The hardcoded pair this
+        # replaced said ("GEMINI_API_KEY", "GROQ_API_KEY"), which was complete
+        # when it was written and silently stopped being so the moment
+        # claude-haiku-4.5 joined FALLBACK_CHAIN behind OPENROUTER_API_KEY.
+        # Production then generated a chain without Haiku, in both the ensemble
+        # and the parser, while every test and every E2E passed -- because
+        # test_bot.yaml happened to pass that key and the two scoring workflows
+        # did not. A test that must be edited whenever the thing it guards
+        # changes is a test that will eventually be wrong.
+        import backtest.pin_models as pin
+
+        chain_keys = sorted({
+            env for _model, env in pin.FALLBACK_CHAIN + pin.PARSER_EXTRA_CHAIN
+        })
+        self.assertTrue(chain_keys, "no chain-gating credentials found")
         workflow_dir = os.path.join(ROOT, ".github", "workflows")
         checked = 0
         for name in sorted(os.listdir(workflow_dir)):
