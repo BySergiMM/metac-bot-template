@@ -178,10 +178,32 @@ jobs:
       # spent only when something new actually opens. The repository is
       # public, so standard-runner minutes are free.
       #
-      # Sizing: the window is deliberately ~= the measured median gap rather
-      # than the 6h job ceiling. That is enough for runs to hand over to one
-      # another most of the time, without turning a scheduled job into a
-      # permanently resident process, which is not what Actions is for.
+      # SIZING -- corrected 2026-09-12, after the first version exhausted the
+      # account's Actions allowance in two days.
+      #
+      # The first version used a 3h window, reasoning that matching the median
+      # gap between delivered events would let runs hand over to one another.
+      # It said, in this very comment, that the point was to avoid "turning a
+      # scheduled job into a permanently resident process". That is precisely
+      # what it did, and the mechanism was in the file the whole time:
+      # `cancel-in-progress: false` QUEUES the scheduled events that arrive
+      # during a run, so the moment one 3h run ends the queued one starts.
+      # Observed: 3h13m, 3h00m, 3h01m, 3h32m, 5h13m, 4h10m ... back to back,
+      # ~24h of runner time per day.
+      #
+      # What it bought was almost nothing. MiniBench opens a batch roughly
+      # every two weeks and tournament 33022 has had no open questions for
+      # weeks, so the overwhelming majority of polls discovered zero questions.
+      # Paying continuous occupancy for a bi-weekly event is the wrong trade
+      # however good the detection latency is.
+      #
+      # Two changes, and the second matters more than the first:
+      #   * the window is 40 minutes, not 3 hours;
+      #   * the window ENDS EARLY once POLL_IDLE_LIMIT consecutive polls find
+      #     zero open questions. When the tournaments are quiet a run now costs
+      #     about two polls; when a batch is actually open the loop keeps its
+      #     5-minute granularity for the full window, which is the only time
+      #     that granularity was ever worth anything.
       #
       # A poll that fails does NOT abort the window -- one bad question, or one
       # provider outage, must not blind the bot for the remaining hours. But a
@@ -189,25 +211,52 @@ jobs:
       # so the WhatsApp failure notifier below still fires on a systemic break.
       - name: Run bot
         # Must exceed POLL_WINDOW_SECONDS plus the longest single poll, and
-        # stay under GitHub's 6h job ceiling.
-        timeout-minutes: 215
+        # stay well under GitHub's 6h job ceiling.
+        timeout-minutes: 55
         run: |
           set -uo pipefail
           window="${POLL_WINDOW_SECONDS}"
           interval="${POLL_INTERVAL_SECONDS}"
+          idle_limit="${POLL_IDLE_LIMIT}"
           deadline=$(( $(date +%s) + window ))
           polls=0
           failures=0
+          idle=0
           while : ; do
             polls=$(( polls + 1 ))
             echo "::group::poll ${polls}"
-            if poetry run python main.py; then
+            out="$(mktemp)"
+            if poetry run python main.py 2>&1 | tee "${out}"; then
               echo "poll ${polls}: ok"
             else
               failures=$(( failures + 1 ))
               echo "poll ${polls}: exited non-zero (failures=${failures})"
             fi
-            echo "::endgroup::"
+            # How many open questions discovery actually found, summed across
+            # tournaments. discovery.py emits one line per tournament:
+            #   discovery_complete tournament=<id> pages=<n> questions=<n>
+            found="$(grep 'discovery_complete' "${out}" \
+                     | grep -o 'questions=[0-9]*' | cut -d= -f2 \
+                     | awk '{t+=$1} END {print t+0}')"
+            marker="$(grep -c 'discovery_complete' "${out}" || true)"
+            rm -f "${out}"
+            echo "poll ${polls}: discovered ${found} open question(s)"
+            if [ "${marker}" -eq 0 ]; then
+              # No discovery line at all: the run died before discovery, or
+              # discovery.py changed its log format. Either way this heuristic
+              # cannot speak, so it does not get a vote -- keep polling and let
+              # the window bound the cost. test_production_invariants pins the
+              # marker so the second case fails loudly instead.
+              idle=0
+            elif [ "${found}" -eq 0 ]; then
+              idle=$(( idle + 1 ))
+            else
+              idle=0
+            fi
+            if [ "${idle}" -ge "${idle_limit}" ]; then
+              echo "poll_window_early_exit polls=${polls} idle=${idle}"
+              break
+            fi
             now=$(date +%s)
             if [ "${now}" -ge "${deadline}" ]; then break; fi
             remaining=$(( deadline - now ))
@@ -223,10 +272,13 @@ jobs:
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
-          # 3h of coverage per delivered event, polled every 5 minutes -- the
-          # granularity the cron asks for and never gets.
-          POLL_WINDOW_SECONDS: "10800"
+          # 40 minutes, not 3 hours. See the sizing note above the step.
+          POLL_WINDOW_SECONDS: "2400"
           POLL_INTERVAL_SECONDS: "300"
+          # Consecutive polls finding ZERO open questions before the window
+          # ends early. Two, because one empty poll is normal between batches
+          # and two in a row means the tournaments are genuinely quiet.
+          POLL_IDLE_LIMIT: "2"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
