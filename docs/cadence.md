@@ -120,9 +120,58 @@ GitHub's 6 h ceiling.
 **Validation, and its limit.** The loop script was extracted from the workflow
 and exercised against a stub bot for all three cases (clean, all-fail,
 intermittent), confirming the exit codes and that the window is respected. It
-has **not** yet been observed across a full 3 h window in CI. Re-measure the
-gap distribution after several days: if delivered events have not changed but
-*coverage* has, the change worked.
+had **not** been observed across a full window in CI before shipping.
+
+## The 3-hour window was wrong, and it cost the Actions allowance
+
+Re-measured 2026-09-12, after two days in production. The account ran out of
+GitHub Actions for roughly three weeks.
+
+Observed run durations, back to back:
+
+    3h13m  3h00m  3h01m  3h32m  5h13m  4h10m  3h17m  3h00m  3h01m  3h00m
+
+That is ~24 h of runner time per day. The mechanism was in the workflow the
+whole time and this document failed to reason about it: `cancel-in-progress:
+false` **queues** the scheduled events that arrive during a run, so the moment
+a 3 h run ends, the queued one starts. "Runs hand over to one another" — the
+stated goal — and "a permanently resident process" — the stated thing to avoid
+— are the same outcome. The note above claimed the sizing avoided it; it
+guaranteed it.
+
+What the occupancy bought was close to nothing. Tournament 33022 has had no
+open questions for weeks and MiniBench opens a batch roughly every two weeks,
+so the overwhelming majority of polls discovered **zero** questions. Paying
+continuous occupancy to catch a bi-weekly event is the wrong trade at any
+detection latency.
+
+### What it is now
+
+| | before | after |
+| --- | --- | --- |
+| window | 3 h | **40 min** |
+| early exit | none | after **2** consecutive polls finding 0 open questions |
+| step timeout | 215 min | 55 min |
+
+The early exit matters more than the window. When the tournaments are quiet a
+run now costs about two polls; when a batch is genuinely open the loop keeps
+its 5-minute granularity for the whole window, which is the only circumstance
+in which that granularity was ever worth paying for.
+
+A run that dies *before* discovery does not count as idle — it says nothing
+about whether the tournaments are quiet, and treating it as idle would end the
+window on exactly the runs that deserve another attempt.
+
+`tests/test_production_invariants.py` now caps the window at one hour, requires
+the early exit, and pins the `discovery_complete ... questions=<n>` marker the
+loop reads, so renaming it in `discovery.py` fails loudly rather than silently
+restoring continuous polling.
+
+### The lesson worth keeping
+
+The cost of a scheduled workflow is not the cost of one run. It is one run
+times how often the platform will start another, and a concurrency group that
+queues rather than drops turns "occasionally" into "always".
 
 ## What would actually give ~5-minute detection
 

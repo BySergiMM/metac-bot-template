@@ -484,6 +484,9 @@ class WorkflowInvariants(unittest.TestCase):
             match = re.search(key + r':\s*"(\d+)"', text)
             self.assertIsNotNone(match, key + " is gone from the workflow")
             out[key] = int(match.group(1))
+        idle = re.search(r'POLL_IDLE_LIMIT:\s*"(\d+)"', text)
+        if idle:
+            out["POLL_IDLE_LIMIT"] = int(idle.group(1))
         timeout = re.search(r"timeout-minutes:\s*(\d+)", text)
         self.assertIsNotNone(timeout, "the Run bot step lost its timeout")
         out["timeout_seconds"] = int(timeout.group(1)) * 60
@@ -503,6 +506,51 @@ class WorkflowInvariants(unittest.TestCase):
         """GitHub kills a job at 6 hours. A step timeout above that is a
         promise the platform will not keep."""
         self.assertLess(self._poll_settings()["timeout_seconds"], 6 * 60 * 60)
+
+    def test_the_window_cannot_occupy_a_runner_continuously(self):
+        """The first version of this loop used a 3h window and, with
+        cancel-in-progress: false queueing the scheduled events that arrive
+        during a run, occupied a runner ~24h/day and exhausted the account's
+        Actions allowance in two days.
+
+        The bound that prevents it: a window must be a small fraction of the
+        gap between DELIVERED events, which docs/cadence.md measures in hours.
+        One hour is the ceiling; anything near the 6h job limit is how the
+        first version looked."""
+        window = self._poll_settings()["POLL_WINDOW_SECONDS"]
+        self.assertLessEqual(
+            window, 3600,
+            "a window over an hour makes runs queue back-to-back and occupy "
+            "a runner continuously",
+        )
+
+    def test_the_window_ends_early_when_nothing_is_open(self):
+        """The change that actually cut the cost. Tournament 33022 has had no
+        open questions for weeks and MiniBench opens a batch roughly every two
+        weeks, so nearly every poll discovers zero questions and there is
+        nothing to stay awake for."""
+        settings = self._poll_settings()
+        self.assertIn("POLL_IDLE_LIMIT", settings)
+        self.assertGreaterEqual(settings["POLL_IDLE_LIMIT"], 1)
+        text = read(*self.TOURNAMENT)
+        self.assertIn("poll_window_early_exit", text)
+
+    def test_the_early_exit_reads_a_marker_discovery_actually_emits(self):
+        """The loop decides whether to keep polling by counting
+        `questions=<n>` on discovery_complete lines. If discovery.py ever
+        renames that marker the loop would stop being able to tell a quiet
+        tournament from a broken run -- silently, and in the direction of
+        burning minutes again. Pin both halves."""
+        self.assertIn("discovery_complete tournament=%s pages=%d questions=%d",
+                      read("discovery.py"))
+        self.assertIn("discovery_complete", read(*self.TOURNAMENT))
+
+    def test_a_poll_with_no_discovery_line_does_not_end_the_window(self):
+        """A run that died before discovery says nothing about whether the
+        tournaments are quiet. Treating that as 'idle' would end the window on
+        exactly the runs that need another attempt."""
+        text = read(*self.TOURNAMENT)
+        self.assertIn('if [ "${marker}" -eq 0 ]; then', text)
 
     def test_the_poll_interval_is_the_schedule_granularity(self):
         """5 minutes is the shortest interval GitHub's scheduler accepts, and
