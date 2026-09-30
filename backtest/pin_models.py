@@ -34,13 +34,15 @@ requests/24h per account). A model that is fine at 9am can 429 every question
 by 6pm, and the run does not recover until the provider's own daily reset -
 retrying the same account is a no-op.
 
-When GEMINI_API_KEY and/or GROQ_API_KEY are present as well as
-OPENROUTER_API_KEY, every role - including parser - is wrapped in
-backtest.fallback_llm.FallbackLlm, which tries OpenRouter first and falls
-through to Gemini, then Groq, only on an actual failure (rate limit, timeout,
-provider outage) - never as a quality preference. Each backend keeps its own
-timeout/allowed_tries. If only OPENROUTER_API_KEY is set, behavior is
-unchanged: a single GeneralLlm per role, same as before fallback existed.
+Each of OPENROUTER_API_KEY, GEMINI_API_KEY and GROQ_API_KEY that is present
+activates one backend of FALLBACK_CHAIN. When at least one is, every role -
+including parser - is wrapped in backtest.fallback_llm.FallbackLlm, which tries
+the role's own model first and falls through to the active backends in chain
+order (OpenRouter, Gemini, Groq), only on an actual failure (rate limit,
+timeout, provider outage) - never as a quality preference. Each backend keeps
+its own timeout/allowed_tries, and a model appears once per chain. If none of
+the three keys is set, behavior is unchanged: a single GeneralLlm per role (a
+bare model string for the parser), same as before fallback existed.
 
 The parser is included even though it is a few hundred tokens per call and
 was never at risk of a per-model or per-minute limit: OpenRouter's free tier
@@ -71,26 +73,34 @@ Why the defaults are what they are
 ----------------------------------
 Metaculus's own FutureEval writeup found model choice to be the single largest
 differentiator between winning and losing bots, and that plain one-shot bots on
-frontier models placed top-5. So the reasoning roles get the best model that
-costs nothing.
+frontier models placed top-5. So the forecaster, the role whose output is
+scored, leads on the strongest model the key can reach. The comment above
+DEFAULTS has the current choice, its prices, and why: the OpenRouter key that
+Metaculus funded on 2026-09-10 cannot reach nvidia/* models at all.
 
-The obvious pick, nemotron-3-ultra-550b, was measured and rejected: on OpenRouter's
-free tier it queued past 60s and timed out on 8 of 9 test questions. A model that
-does not answer inside the window scores zero, however good it is. nemotron-3.5-lightning
-is the free model built for latency, so that is what runs.
+That matters because the first version of these defaults ran on free Nvidia
+models. nemotron-3-ultra-550b, the obvious pick, was measured and rejected: on
+OpenRouter's free tier it queued past 60s and timed out on 8 of 9 test
+questions. A model that does not answer inside the window scores zero, however
+good it is. nemotron-3.5-lightning, the free model built for latency, was the
+primary for three roles until the sponsored key, which cannot reach it, took
+over.
 
 The parser has to emit structured output reliably, which the free Nvidia endpoints
-do not advertise, so that role alone uses a paid model - at roughly a thousandth of
-a cent per question. It stays a bare string, exactly as the official template ships
-it: parsing is a few hundred tokens and never came close to the default timeout, so
-there is nothing to gain by varying it.
+do not advertise, so that role uses a cheap paid model - at roughly a thousandth of
+a cent per question. With no fallback key present it stays a bare string, exactly
+as the official template ships it: parsing is a few hundred tokens and never came
+close to the default timeout, so there is nothing to gain by varying it. With one
+it is wrapped like every other role, as described above.
 
 Preflight
 ---------
 `python backtest/pin_models.py --check` additionally sends one tiny completion to
-every distinct model and exits 1 if any of them errors. That is what caught the
-dead `gpt-4o-search-preview` id: a model that 404s costs a whole tournament run,
-and the run is the scarce resource, not the token.
+every distinct model and exits 1 if any role is left with no working model at
+all; a dead primary with a live fallback behind it is not a failure, because
+absorbing that is what the fallback is for. That is what caught the dead
+`gpt-4o-search-preview` id: a model that 404s costs a whole tournament run, and
+the run is the scarce resource, not the token.
 
 Exits 1 if the anchor block is missing, so an upstream template change fails
 loudly instead of silently restoring the broken defaults.
@@ -136,11 +146,11 @@ DEFAULTS = {
     "parser": "openrouter/openai/gpt-4o-mini",
 }
 
-# Fallback chain for the free OpenRouter model, tried in order only on
+# Fallback chain behind each role's own model, tried in order only on
 # failure (rate limit, timeout, outage). Each needs its own API key as an
-# env var (GEMINI_API_KEY / GROQ_API_KEY) - present in the workflow only if
-# the corresponding secret is set. Absent keys are skipped, never an error:
-# fallback is an upgrade, not a requirement.
+# env var (OPENROUTER_API_KEY / GEMINI_API_KEY / GROQ_API_KEY) - present in
+# the workflow only if the corresponding secret is set. Absent keys are
+# skipped, never an error: fallback is an upgrade, not a requirement.
 # Every entry here was verified end-to-end by research/smoke_test_providers.py
 # (workflow run 32293364075): the provider's own /models catalogue was listed,
 # then a real completion returned 200 OK through BOTH raw HTTP and litellm.
@@ -389,7 +399,8 @@ def _fallbacks_for(role: str) -> list[str]:
 #     the success threshold - BalancedLlm is one call in, one string out
 #   * not applied to summarizer/researcher (called once per question, so
 #     "diversity" there is a lottery over which model answers, not an ensemble)
-#     nor to parser (only Gemini emits schema-constrained JSON here)
+#     nor to parser (restricted to STRUCTURED_OUTPUT_CAPABLE backends, the
+#     ones verified to emit schema-constrained JSON)
 #
 # Bucket keys are the primary model names themselves, which is deliberate:
 # those are the exact strings backtest.rate_limiter.DEFAULT_LIMITS registers,
@@ -468,9 +479,10 @@ def _chain_expr(model: str, fallbacks: list[str], indent: int = 12) -> str:
 
 
 def _role_expr(role: str, model: str) -> str:
-    """The right-hand side for one llms={} entry. Reasoning roles get wrapped
-    in FallbackLlm when at least one fallback API key is present; otherwise
-    (or for the parser) a single GeneralLlm, unchanged from before fallback
+    """The right-hand side for one llms={} entry. Every role, the parser
+    included (see REASONING_ROLES), gets wrapped in FallbackLlm when
+    _fallbacks_for(role) is not empty, which takes at least one fallback API
+    key; otherwise a single GeneralLlm, unchanged from before fallback
     existed.
 
     The "default" role additionally ensembles across primary models -- see the

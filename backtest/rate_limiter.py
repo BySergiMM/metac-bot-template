@@ -64,8 +64,10 @@ class ProviderLimits:
     """Known quota for one model.
 
     Defaults are transcribed from what the providers actually returned during
-    the E2E run, not from documentation. Every value is overridable by env var
-    so a tier change does not need a code change.
+    the E2E run, not from documentation. The two quota values,
+    requests_per_minute and tokens_per_minute, are overridable by env var (see
+    _env_override) so a tier change does not need a code change;
+    estimated_tokens_per_call and max_wait_seconds are not.
     """
 
     requests_per_minute: float | None = None
@@ -206,12 +208,13 @@ class ProviderRateLimiter:
         self._clock = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
         # The lock is bound lazily, per running event loop. main.py calls
-        # asyncio.run() twice - once for the tournament, once for MiniBench
-        # (main.py:703 and :709) - so a lock created under the first loop would
-        # raise "got Future attached to a different loop" for every call in the
-        # second, wiping out MiniBench entirely. The sliding-window state below
-        # deliberately does NOT reset with the loop: the provider's quota does
-        # not care that our process started a new loop.
+        # asyncio.run() twice in its `run_mode == "tournament"` branch - once
+        # for the tournament, once for MiniBench - so a lock created under the
+        # first loop would raise "got Future attached to a different loop" for
+        # every call in the second, wiping out MiniBench entirely. The
+        # sliding-window state below deliberately does NOT reset with the
+        # loop: the provider's quota does not care that our process started a
+        # new loop.
         self._lock: asyncio.Lock | None = None
         self._lock_loop: Any = None
         self._requests: deque[float] = deque()
