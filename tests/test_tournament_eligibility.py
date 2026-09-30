@@ -220,11 +220,6 @@ class TestsNeverPublishTests(unittest.TestCase):
 
 
 class ProductionTargetTests(unittest.TestCase):
-    def test_the_e2e_workflow_targets_only_the_practice_area(self):
-        src = read(".github", "workflows", "research_fallback_e2e.yaml")
-        self.assertIn("bot-testing-area", src)
-        self.assertNotIn("CURRENT_AI_COMPETITION_ID: ", src)
-
     def test_the_tournament_workflow_runs_the_unmodified_entry_point(self):
         src = read(".github", "workflows", "run_bot_on_tournament.yaml")
         self.assertIn("poetry run python main.py", src)

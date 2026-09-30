@@ -41,9 +41,9 @@ def yaml_without_comments(*parts: str) -> str:
     """Workflow text with `#` comment lines removed.
 
     Necessary because these workflows document what they deliberately do NOT
-    contain -- research_fallback_e2e.yaml literally says "No `schedule:` key
-    anywhere in this file, on purpose" -- so a plain substring search finds
-    the prose rather than the key.
+    contain -- ci.yaml literally says a future edit adding `env: secrets.*`
+    must be caught -- so a plain substring search finds the prose rather than
+    the key.
     """
     kept = []
     for line in read(*parts).splitlines():
@@ -330,7 +330,6 @@ class WorkflowInvariants(unittest.TestCase):
     PRODUCTION = (".github", "workflows", "run_bot_on_tournament.yaml")
     CUP = (".github", "workflows", "run_bot_on_metaculus_cup.yaml")
     TEST_BOT = (".github", "workflows", "test_bot.yaml")
-    E2E = (".github", "workflows", "research_fallback_e2e.yaml")
 
     def test_production_runs_the_scored_tournament_mode(self):
         src = read(*self.PRODUCTION)
@@ -346,16 +345,14 @@ class WorkflowInvariants(unittest.TestCase):
         self.assertIn("concurrency:", src)
         self.assertIn("cancel-in-progress: false", src)
 
-    def test_the_unscored_workflows_target_only_the_practice_area(self):
-        for parts in (self.TEST_BOT, self.E2E):
-            src = read(*parts)
-            self.assertIn("--mode test_questions", src, "/".join(parts))
+    def test_the_unscored_workflow_targets_only_the_practice_area(self):
+        src = read(*self.TEST_BOT)
+        self.assertIn("--mode test_questions", src)
 
     def test_no_unscored_workflow_is_scheduled(self):
-        for parts in (self.TEST_BOT, self.E2E):
-            src = yaml_without_comments(*parts)
-            self.assertNotIn("schedule:", src, "/".join(parts))
-            self.assertNotIn("cron:", src, "/".join(parts))
+        src = yaml_without_comments(*self.TEST_BOT)
+        self.assertNotIn("schedule:", src)
+        self.assertNotIn("cron:", src)
 
     def test_exactly_one_workflow_publishes_to_a_scored_tournament(self):
         """The Cup workflow also publishes, so it must stay off the schedule
@@ -634,10 +631,6 @@ class WorkflowInvariants(unittest.TestCase):
             # Must EXECUTE main.py, not merely mention it: ci.yaml names the
             # file in a test command without ever running the bot.
             if "python main.py" not in text:
-                continue
-            # research_fallback_e2e runs main.py with OpenRouter deliberately
-            # absent; it is an experiment about a missing key, not production.
-            if name.startswith("research_"):
                 continue
             steps = text.split("- name:")
             pin = [b for b in steps if "pin_models.py" in b]
