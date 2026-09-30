@@ -220,9 +220,9 @@ class OperationalMessagesSurviveTests(RedactionHarness):
         "discovery_page_limit_reached tournament=t pages=200 page_size=100 "
         "state=discovery_may_be_incomplete",
         "llm_attempt provider_index=1 provider=gemini/gemini-3.5-flash-lite "
-        "bucket=gemini/gemini-3.5-flash-lite#b2 wait_ms=0",
+        "bucket=gemini/gemini-3.5-flash-lite wait_ms=0",
         "llm_success provider_index=1 provider=gemini/gemini-3.5-flash-lite "
-        "bucket=gemini/gemini-3.5-flash-lite#b1 latency_s=1.05 wait_ms=0 "
+        "bucket=gemini/gemini-3.5-flash-lite latency_s=1.05 wait_ms=0 "
         "fallback_used=False",
         "llm_failure provider_index=0 provider=openrouter/x bucket=openrouter/x "
         "latency_s=0.03 reason='RateLimitError'",

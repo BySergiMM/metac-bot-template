@@ -86,9 +86,9 @@ class KeepsOperationalContentTests(unittest.TestCase):
         "Retrieved 3 questions from tournament 33022",
         "Retrieving questions from tournament minibench",
         "llm_attempt provider_index=1 provider=gemini/gemini-3.5-flash-lite "
-        "bucket=gemini/gemini-3.5-flash-lite#b2 wait_ms=0",
+        "bucket=gemini/gemini-3.5-flash-lite wait_ms=0",
         "llm_success provider_index=1 provider=gemini/gemini-3.5-flash-lite "
-        "bucket=gemini/gemini-3.5-flash-lite#b1 latency_s=1.05 wait_ms=0 "
+        "bucket=gemini/gemini-3.5-flash-lite latency_s=1.05 wait_ms=0 "
         "fallback_used=False",
         "llm_failure provider_index=0 provider=openrouter/x bucket=openrouter/x "
         "latency_s=0.03 reason='RateLimitError'",
@@ -105,10 +105,11 @@ class KeepsOperationalContentTests(unittest.TestCase):
                              "redaction must not touch: " + message)
 
     def test_the_bucket_stays_visible(self):
-        """Without bucket= the four-bucket distribution is unmeasurable."""
+        """bucket= is part of the llm_* line format that audits read, so
+        redaction must leave the field alone."""
         message = ("llm_attempt provider_index=1 provider=gemini/gemini-3.5-flash-lite "
-                   "bucket=gemini/gemini-3.5-flash-lite#b3 wait_ms=0")
-        self.assertIn("#b3", apply(message))
+                   "bucket=gemini/gemini-3.5-flash-lite wait_ms=0")
+        self.assertIn("bucket=gemini/gemini-3.5-flash-lite", apply(message))
 
 
 class InstallationTests(unittest.TestCase):

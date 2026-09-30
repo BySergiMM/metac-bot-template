@@ -273,39 +273,11 @@ ACTIVE_PARSER_EXTRA = [
     (model, env_var) for model, env_var in PARSER_EXTRA_CHAIN if os.getenv(env_var)
 ]
 
-# Additional Gemini credentials, each backed by its own Google project and so
-# its own 15 RPM allowance. Proven independent by interference, not assumed:
-# runs 32380381980 and 32381181256 saturated one key and found every other key
-# still admitted inside the same 60s window, for all six pairs.
-#
-# Order is fixed and meaningful: index i maps to rate_limiter's bucket i, and
-# GEMINI_API_KEY is always bucket 0, so a single-key install produces exactly
-# the registry it produced before buckets existed.
-# Deliberately NOT imported from backtest.rate_limiter. This file runs as a
-# bare script -- the workflow calls `python backtest/pin_models.py`, so the
-# repo root is not on sys.path and any `backtest.*` import raises
-# ModuleNotFoundError before the bot ever starts. The values are duplicated
-# here and test_pin_models_buckets asserts they never drift apart.
-GEMINI_BUCKET_MODEL = "gemini/gemini-3.5-flash-lite"
-GEMINI_BUCKET_KEYS = (
-    GEMINI_BUCKET_MODEL,
-    GEMINI_BUCKET_MODEL + "#b1",
-    GEMINI_BUCKET_MODEL + "#b2",
-    GEMINI_BUCKET_MODEL + "#b3",
-)
-
-GEMINI_BUCKET_ENV_VARS = (
-    "GEMINI_API_KEY",
-    "GEMINI2_API_KEY",
-    "GEMINI3_API_KEY",
-    "GEMINI4_API_KEY",
-)
-
 # Model strings that backtest.rate_limiter.DEFAULT_LIMITS registers a limiter
-# for. Duplicated here for exactly the reason GEMINI_BUCKET_KEYS is duplicated
-# above: this file runs as a bare script with the repo root off sys.path, so
-# `from backtest.rate_limiter import ...` would raise ModuleNotFoundError
-# before the bot ever starts. tests/test_pin_models_buckets.py asserts the two
+# for. Duplicated here because this file runs as a bare script -- the workflow
+# calls `python backtest/pin_models.py`, so the repo root is not on sys.path
+# and `from backtest.rate_limiter import ...` would raise ModuleNotFoundError
+# before the bot ever starts. tests/test_pin_models_chains.py asserts the two
 # never drift apart.
 #
 # It matters because `DEFAULT_LIMITS.get(model, ProviderLimits())` returns an
@@ -322,22 +294,7 @@ RATE_LIMITED_MODELS = frozenset(
         "openrouter/nvidia/nemotron-3.5-lightning:free",
         "openrouter/openai/gpt-4o-mini",
     }
-    | set(GEMINI_BUCKET_KEYS)
 )
-
-# (env_var, limiter_key) for the credentials present RIGHT NOW. Read at patch
-# time, like ACTIVE_FALLBACKS, so the generated main.py is an honest record of
-# what ran. A key present here contributes a bucket; a key absent contributes
-# nothing and the run simply has fewer buckets.
-ACTIVE_GEMINI_BUCKETS = [
-    (env_var, GEMINI_BUCKET_KEYS[i])
-    for i, env_var in enumerate(GEMINI_BUCKET_ENV_VARS)
-    if os.getenv(env_var)
-]
-
-# Balancing is only worth anything with two or more buckets. With one, the
-# generated block must be the pre-bucket block, unchanged.
-BALANCED = len(ACTIVE_GEMINI_BUCKETS) > 1
 
 OVERRIDE_FILE = pathlib.Path(__file__).with_name("models.txt")
 
@@ -402,9 +359,6 @@ def _fallbacks_for(role: str) -> list[str]:
     return [m for m in capable if m != primary]
 
 
-GEMINI_MODEL = "gemini/gemini-3.5-flash-lite"
-
-
 # ---------------------------------------------------------------- ensemble
 # MODEL DIVERSITY FOR THE FORECASTER ROLE.
 #
@@ -442,9 +396,10 @@ GEMINI_MODEL = "gemini/gemini-3.5-flash-lite"
 # Bucket keys are the primary model names themselves, which is deliberate:
 # those are the exact strings backtest.rate_limiter.DEFAULT_LIMITS registers,
 # so the balancer measures load on the SAME limiters the backends acquire from,
-# rather than keeping a parallel set of books. test_pin_models asserts every
-# emitted bucket key is registered - an unregistered key silently resolves to
-# an UNTHROTTLED limiter, which would quietly disable Groq's 8000 TPM cap.
+# rather than keeping a parallel set of books. test_pin_models_chains asserts
+# every emitted bucket key is registered - an unregistered key silently
+# resolves to an UNTHROTTLED limiter, which would quietly disable Groq's 8000
+# TPM cap.
 def _ensemble_primaries(model: str) -> list[str]:
     """The distinct primary models the forecaster ensembles over.
 
@@ -471,22 +426,10 @@ def _ensemble_expr(model: str) -> str:
     chains = []
     for primary in primaries:
         others = [m for m in primaries if m != primary]
-        chains.append(_chain_expr(primary, others, bucket=None, indent=16))
+        chains.append(_chain_expr(primary, others, indent=16))
     joined = ",\n                ".join(chains)
     keys = ", ".join(f'"{p}"' for p in primaries)
     return f"BalancedLlm([\n                {joined},\n            ], [{keys}])"
-
-
-def _bucket_expr(env_var: str, limiter_key: str) -> str:
-    """One Gemini link bound to a specific credential and quota bucket.
-
-    The env var NAME is emitted, never its value: a secret must not be written
-    into main.py. bucket_backend reads it at bot runtime.
-    """
-    return (
-        f'bucket_backend("{GEMINI_MODEL}", "{env_var}", "{limiter_key}", '
-        f"{TIMEOUT_SECONDS}, {TRIES_IN_CHAIN})"
-    )
 
 
 def _chain_models(model: str, fallbacks: list[str]) -> list[str]:
@@ -510,29 +453,16 @@ def _chain_models(model: str, fallbacks: list[str]) -> list[str]:
     return list(dict.fromkeys([model, *fallbacks]))
 
 
-def _chain_expr(
-    model: str,
-    fallbacks: list[str],
-    bucket: tuple[str, str] | None,
-    indent: int = 12,
-) -> str:
+def _chain_expr(model: str, fallbacks: list[str], indent: int = 12) -> str:
     """One FallbackLlm, in the production order OpenRouter -> Gemini -> Groq.
 
-    When `bucket` is given, the Gemini link is bound to that credential and
-    quota bucket; every other link is byte-identical to the unbalanced form.
     The ORDER is never altered -- balancing chooses between whole chains, it
     does not reorder the links inside one. No backend is listed twice; see
     _chain_models.
     """
     ordered = _chain_models(model, fallbacks)
-    backends = [_backend_expr(ordered[0], TRIES_IN_CHAIN)]
-    for fb_model in ordered[1:]:
-        if bucket is not None and fb_model == GEMINI_MODEL:
-            backends.append(_bucket_expr(*bucket))
-        else:
-            backends.append(_backend_expr(fb_model, TRIES_IN_CHAIN))
-    # `indent` keeps the unbalanced output byte-identical to the pre-bucket
-    # generator; a chain nested inside BalancedLlm sits one level deeper.
+    backends = [_backend_expr(m, TRIES_IN_CHAIN) for m in ordered]
+    # A chain nested inside BalancedLlm sits one level deeper, hence `indent`.
     inner = " " * (indent + 4)
     outer = " " * indent
     joined = (",\n" + inner).join(backends)
@@ -545,21 +475,8 @@ def _role_expr(role: str, model: str) -> str:
     (or for the parser) a single GeneralLlm, unchanged from before fallback
     existed.
 
-    With two or more Gemini credentials present, the FallbackLlm is replicated
-    once per bucket and the copies are wrapped in a BalancedLlm. With one
-    credential the output is exactly what it was before buckets existed --
-    there is no BalancedLlm around a single chain.
-
     The "default" role additionally ensembles across primary models -- see the
-    ensemble note above _ensemble_primaries. That path and the Gemini-bucket
-    path are deliberately NOT combined: buckets replicate ONE model across
-    credentials, the ensemble replicates DIFFERENT models across one credential
-    each, and a cross-product of the two would emit len(primaries) x
-    len(buckets) chains whose load accounting no longer maps one-to-one onto a
-    limiter. Buckets win if both are somehow active, because that is the path
-    with the measured quota evidence behind it (runs 32380381980 / 32381181256).
-    In production BALANCED is False by the R11 decision, so the ensemble is what
-    runs.
+    ensemble note above _ensemble_primaries.
     """
     if role not in REASONING_ROLES:
         return _backend_expr(model)
@@ -567,21 +484,9 @@ def _role_expr(role: str, model: str) -> str:
     if not fallbacks:
         return _backend_expr(model)
 
-    if not (BALANCED and GEMINI_MODEL in fallbacks):
-        if role == "default" and len(_ensemble_primaries(model)) > 1:
-            return _ensemble_expr(model)
-        return _chain_expr(model, fallbacks, bucket=None)
-
-    chains = [
-        _chain_expr(model, fallbacks, bucket=(env_var, limiter_key), indent=16)
-        for env_var, limiter_key in ACTIVE_GEMINI_BUCKETS
-    ]
-    joined = ",\n                ".join(chains)
-    keys = ", ".join(f'"{limiter_key}"' for _env, limiter_key in ACTIVE_GEMINI_BUCKETS)
-    return (
-        f"BalancedLlm([\n                {joined},\n            ], "
-        f"[{keys}])"
-    )
+    if role == "default" and len(_ensemble_primaries(model)) > 1:
+        return _ensemble_expr(model)
+    return _chain_expr(model, fallbacks)
 
 
 TEMPLATE_HEADER = '''        llms={
@@ -630,9 +535,7 @@ def read_overrides(path: pathlib.Path) -> dict[str, str]:
 
 IMPORT_ANCHOR = "silence_noisy_dependencies()\n"
 IMPORT_LINE = "from backtest.fallback_llm import FallbackLlm\n"
-BALANCED_IMPORT_LINE = (
-    "from backtest.balanced_llm import BalancedLlm, bucket_backend\n"
-)
+BALANCED_IMPORT_LINE = "from backtest.balanced_llm import BalancedLlm\n"
 
 
 def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
@@ -642,10 +545,10 @@ def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
     to the right import state on the next invocation either way.
 
     ``wants_balanced`` says whether the block ABOUT to be generated actually
-    names BalancedLlm -- true for the Gemini-bucket path and for the forecaster
-    ensemble alike. It is passed in rather than recomputed here because only
-    the caller knows the resolved model names, and the ensemble's shape depends
-    on them (see _ensemble_primaries)."""
+    names BalancedLlm, which today only the forecaster ensemble does. It is
+    passed in rather than recomputed here because only the caller knows the
+    resolved model names, and the ensemble's shape depends on them (see
+    _ensemble_primaries)."""
     has_import = IMPORT_LINE in src
     if ACTIVE_FALLBACKS and not has_import:
         if IMPORT_ANCHOR not in src:
@@ -661,7 +564,7 @@ def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
         src = src.replace(IMPORT_LINE, "", 1)
 
     # The balanced import follows the same converge-either-way rule, so adding
-    # or removing a secondary key and re-running lands in the right state.
+    # or removing a provider key and re-running lands in the right state.
     has_balanced = BALANCED_IMPORT_LINE in src
     needs_balanced = wants_balanced and bool(ACTIVE_FALLBACKS)
     if needs_balanced and not has_balanced:
@@ -767,17 +670,10 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
             self.chains = chains
             self.bucket_keys = bucket_keys
 
-    def _stub_bucket_backend(model, api_key_env, limiter_key, timeout, tries):
-        backend = _StubGeneralLlm(model)
-        backend.limiter_key = limiter_key
-        backend.api_key_env = api_key_env
-        return backend
-
     namespace = {
         "GeneralLlm": _StubGeneralLlm,
         "FallbackLlm": _StubFallbackLlm,
         "BalancedLlm": _StubBalancedLlm,
-        "bucket_backend": _stub_bucket_backend,
     }
     exec(f"result = {block_src[len('llms='):]}", namespace)  # noqa: S102 - trusted, self-generated code
     result = namespace["result"]
@@ -794,47 +690,6 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
         expected_chain = _chain_models(primary, expected_fallbacks)
         if expected_fallbacks:
             entry = result[role]
-            if BALANCED and GEMINI_BUCKET_MODEL in expected_fallbacks:
-                # One chain per credential, wrapped. The bucket keys must be
-                # exactly the registered ones, in order: an unregistered key
-                # would resolve to a limiter with NO rate limit at all.
-                assert isinstance(entry, _StubBalancedLlm), f"{role} should be balanced"
-                assert len(entry.chains) == len(ACTIVE_GEMINI_BUCKETS), (
-                    f"{role}: {len(entry.chains)} chains for "
-                    f"{len(ACTIVE_GEMINI_BUCKETS)} credentials"
-                )
-                assert entry.bucket_keys == [k for _e, k in ACTIVE_GEMINI_BUCKETS], (
-                    f"{role}: bucket keys {entry.bucket_keys} do not match the "
-                    "registered buckets"
-                )
-                for key in entry.bucket_keys:
-                    assert key in GEMINI_BUCKET_KEYS, (
-                        f"{role}: {key!r} is not a registered bucket, so its "
-                        "limiter would be created with no rate limit"
-                    )
-                seen_envs = []
-                for chain, expected_key in zip(entry.chains, entry.bucket_keys):
-                    assert isinstance(chain, _StubFallbackLlm)
-                    served = [b.model for b in chain.backends]
-                    assert served == expected_chain, (
-                        f"{role} chain order changed: {served}"
-                    )
-                    # Find the Gemini link by MODEL, not by position. It used
-                    # to sit at index 1 because Gemini led FALLBACK_CHAIN;
-                    # Haiku took that slot on 2026-09-10 and this assertion
-                    # started reading the wrong backend.
-                    gem = next(b for b in chain.backends
-                               if b.model == GEMINI_BUCKET_MODEL)
-                    assert gem.limiter_key == expected_key, (
-                        f"{role}: chain bound to {gem.limiter_key}, expected "
-                        f"{expected_key}"
-                    )
-                    seen_envs.append(gem.api_key_env)
-                assert len(set(seen_envs)) == len(seen_envs), (
-                    f"{role}: two chains share a credential ({seen_envs}); "
-                    "they would contend for one quota"
-                )
-                continue
             if role == "default" and len(_ensemble_primaries(models[role])) > 1:
                 # One chain per PRIMARY model. Every chain must still carry the
                 # full set of primaries -- only the starting rung differs -- so
@@ -863,7 +718,7 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
                 # An unregistered limiter key resolves to an UNTHROTTLED
                 # limiter, which would silently disable Groq's measured 8000
                 # TPM cap. Checked against RATE_LIMITED_MODELS, which
-                # test_pin_models_buckets pins to rate_limiter.DEFAULT_LIMITS.
+                # test_pin_models_chains pins to rate_limiter.DEFAULT_LIMITS.
                 for key in entry.bucket_keys:
                     assert key in RATE_LIMITED_MODELS, (
                         f"{role}: {key!r} is not a rate-limiter-registered "
@@ -895,7 +750,7 @@ def selftest() -> None:
     ACTIVE_FALLBACKS reflects whatever keys are actually set when this module was
     imported, so every check below reads that real value rather than hardcoding [].
     """
-    global ACTIVE_FALLBACKS, ACTIVE_GEMINI_BUCKETS, BALANCED
+    global ACTIVE_FALLBACKS
     stub = IMPORT_ANCHOR + "\n" + BOT_INIT_ANCHOR + "        a=1,\n" + ANCHOR + "    )\n"
     once = patch(stub, DEFAULTS)
     assert "# llms={" not in once, "comment markers survived the patch"
@@ -927,10 +782,6 @@ def selftest() -> None:
     # The docstring's own example model (gpt-4o) must survive untouched,
     # and the real block below it must be the one that got patched.
     assert 'model="openrouter/openai/gpt-4o"' in trapped  # docstring example untouched
-    # Three reasoning roles are patched. When balancing is active each role
-    # emits one chain per credential, and every chain opens with the same
-    # OpenRouter backend, so the model string appears once per chain per role.
-    # The parser is excluded from this count: it uses a different default.
     # Structural, not a string count. These assertions used to count how many
     # times DEFAULTS["default"] appeared, which silently assumed default,
     # researcher and summarizer all shared one model string. They stopped
@@ -951,18 +802,10 @@ def selftest() -> None:
     # gets every backend, since parser shares OpenRouter's account-wide daily
     # cap with the reasoning roles.
     saved_fallbacks = ACTIVE_FALLBACKS
-    saved_buckets = ACTIVE_GEMINI_BUCKETS
-    saved_balanced = BALANCED
     try:
         # Exercise the real configured chain rather than a hardcoded copy, so
         # this check cannot drift away from FALLBACK_CHAIN.
         ACTIVE_FALLBACKS = list(FALLBACK_CHAIN)
-        # Pin the bucket count too. Without this the counts below silently
-        # depend on how many GEMINI*_API_KEY happen to be set in the calling
-        # environment, which is what broke CI run 32385415823: the block was
-        # written for one chain per role and a second credential makes it two.
-        ACTIVE_GEMINI_BUCKETS = [(GEMINI_BUCKET_ENV_VARS[0], GEMINI_BUCKET_KEYS[0])]
-        BALANCED = False
         parser_fallbacks = _fallbacks_for("parser")
         reasoning_fallbacks = _fallbacks_for("default")
         # The forecaster ensembles over one chain per primary model, and every
@@ -1002,42 +845,12 @@ def selftest() -> None:
         _eval_llms_dict(with_fb, ACTIVE_FALLBACKS, DEFAULTS)  # real dict, correct backend count per role
         assert patch(with_fb, DEFAULTS) == with_fb  # idempotent with fallback active too
 
-        # Balanced wiring: the same roles, one chain per credential. Counts
-        # scale by the number of buckets, and the balanced import must appear.
-        ACTIVE_GEMINI_BUCKETS = [
-            (env, key) for env, key
-            in zip(GEMINI_BUCKET_ENV_VARS, GEMINI_BUCKET_KEYS)
-        ]
-        BALANCED = True
-        balanced_src = patch(stub, DEFAULTS)
-        buckets = len(ACTIVE_GEMINI_BUCKETS)
-        assert BALANCED_IMPORT_LINE in balanced_src
-        # Structural, for the same reason as the two blocks above: the three
-        # reasoning roles no longer share one model string, so counting the
-        # default model's occurrences measures the role split rather than the
-        # bucket wiring it was written to guard.
-        assert set(_eval_llms_dict(balanced_src, ACTIVE_FALLBACKS, DEFAULTS)) == {
-            "default", "summarizer", "researcher", "parser"
-        }
-        assert balanced_src.count("BalancedLlm([") == 3 + (1 if parser_fallbacks else 0)
-        # Every bucket must be named exactly once per role that uses it.
-        for _env, key in ACTIVE_GEMINI_BUCKETS:
-            occurrences = balanced_src.count('"{0}"'.format(key))
-            assert occurrences > 0, "bucket {0} never appears".format(key)
-        ast.parse(balanced_src)
-        _eval_llms_dict(balanced_src, ACTIVE_FALLBACKS, DEFAULTS)
-        assert patch(balanced_src, DEFAULTS) == balanced_src  # idempotent
-        ACTIVE_GEMINI_BUCKETS = [(GEMINI_BUCKET_ENV_VARS[0], GEMINI_BUCKET_KEYS[0])]
-        BALANCED = False
-
         # Import must disappear again if the chain goes back to empty (keys removed).
         ACTIVE_FALLBACKS = []
         reverted = patch(with_fb, DEFAULTS)
         assert IMPORT_LINE not in reverted
     finally:
         ACTIVE_FALLBACKS = saved_fallbacks
-        ACTIVE_GEMINI_BUCKETS = saved_buckets
-        BALANCED = saved_balanced
 
     tmp = pathlib.Path("/tmp/_pin_models_selftest.txt")
     tmp.write_text("parser: x/y  # trailing comment\n\n# whole-line comment\n")

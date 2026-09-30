@@ -11,7 +11,7 @@ Grouped by the promise, not by the module:
   Security      no secret, rationale, probability or provider body in a log
   Integrity     five predictions stay five; nothing partial is ever published
   Publication   one prediction, one comment, orphans named out loud
-  Concurrency   loop-safe semaphore, bounded research, isolated quota buckets
+  Concurrency   loop-safe semaphore, bounded research, atomic chain selection
   Discovery     every page read, no question processed twice
   Workflow      scored tournaments only from the one production workflow
   Deployment    the code CI generates still keeps all of the above
@@ -96,23 +96,6 @@ class NoCredentialMaterialInProductionCode(unittest.TestCase):
                     shape.search(src),
                     "{0} contains credential-shaped text".format("/".join(parts)),
                 )
-
-    def test_the_generator_emits_env_var_names_not_values(self):
-        """_bucket_expr must interpolate the env var NAME. The behavioural
-        proof is GeneratedCodeInvariants; this pins the mechanism, because a
-        generator that switched to os.environ.get() there would bake a live
-        credential into a file."""
-        tree = parse("backtest", "pin_models.py")
-        node = find_function(tree, "_bucket_expr")
-        self.assertIsNotNone(node, "_bucket_expr is gone")
-        body = ast.unparse(node)
-        self.assertIn("env_var", body, "the env var NAME must be interpolated")
-        self.assertNotIn("os.environ", body)
-        self.assertNotIn("os.getenv", body)
-
-    def test_bucket_backend_reads_the_credential_at_runtime(self):
-        src = read("backtest", "balanced_llm.py")
-        self.assertIn("os.environ.get(api_key_env)", src)
 
 
 class NoForecastContentReachesLogs(unittest.TestCase):
@@ -277,22 +260,14 @@ class ConcurrencyInvariants(unittest.TestCase):
         self.assertIn("_max_concurrent_questions = (\n        1", read("main.py"))
 
     def test_load_order_contains_no_await_or_yield(self):
-        """R9: bucket selection must be atomic under asyncio. A suspension
+        """R9: chain selection must be atomic under asyncio. A suspension
         point between reading the loads and using them would let every
-        concurrent caller pick the same bucket."""
+        concurrent caller pick the same chain."""
         node = find_function(parse("backtest", "balanced_llm.py"), "_load_order")
         self.assertIsNotNone(node)
         for child in ast.walk(node):
             self.assertNotIsInstance(child, ast.Await)
             self.assertNotIsInstance(child, ast.Yield)
-
-    def test_every_gemini_bucket_has_an_explicit_quota(self):
-        """An unregistered bucket key resolves to a limiter with NO limit."""
-        from backtest.rate_limiter import DEFAULT_LIMITS, GEMINI_BUCKET_KEYS
-
-        for key in GEMINI_BUCKET_KEYS:
-            self.assertIn(key, DEFAULT_LIMITS)
-            self.assertEqual(DEFAULT_LIMITS[key].requests_per_minute, 15.0)
 
 
 # ===========================================================  DISCOVERY
@@ -418,8 +393,9 @@ class WorkflowInvariants(unittest.TestCase):
         limits are per project, and the APIs ToS 2.d forbids attempting to
         circumvent them, but no Google source says whether one workload across
         several projects is circumvention. Unresolved, so production carries
-        one bucket. The code path and the secrets both remain; only the
-        production wiring is reduced. See the note in the workflow."""
+        one credential. The code that could spread calls over several has been
+        removed, so this keeps the workflow from suggesting otherwise. See the
+        note in the workflow."""
         src = yaml_without_comments(*self.PRODUCTION)
         self.assertIn("GEMINI_API_KEY:", src, "the fallback leg must stay")
         for extra in ("GEMINI2_API_KEY:", "GEMINI3_API_KEY:", "GEMINI4_API_KEY:"):
@@ -429,36 +405,32 @@ class WorkflowInvariants(unittest.TestCase):
                 "the quota-circumvention question is unresolved",
             )
 
-    def test_one_credential_generates_no_per_credential_bucket_wiring(self):
-        """The R11 mitigation must be a real reduction, not a cosmetic one.
+    def test_extra_gemini_credentials_generate_no_per_credential_wiring(self):
+        """The R11 reduction must be real, not cosmetic: a second Gemini
+        credential in the environment must not be wired into main.py.
 
-        Originally phrased as "emits no BalancedLlm". That proxy stopped
-        meaning what it was written to mean once the forecaster ensemble
-        started reusing BalancedLlm to spread the five forecast calls over
-        three DISTINCT MODELS -- a shape that needs one credential per
-        provider, which is exactly what production has. The property R11
-        actually promised is that no SECOND Gemini credential is wired up, so
-        that is what is asserted now: no bucket_backend call, no limiter_key,
-        and no GEMINI2/3/4 anywhere in the generated source.
+        The code that once did so (bucket_backend, limiter_key, one chain per
+        credential) is gone, so this asserts the absence in the output rather
+        than in a flag: no bucket_backend call, no limiter_key, and no
+        GEMINI2/3/4 anywhere in the generated source, even when those
+        variables ARE set.
         """
         import importlib
         import sys
 
-        saved = {
-            key: os.environ.get(key)
-            for key in ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
-                        "GEMINI4_API_KEY", "GROQ_API_KEY")
-        }
+        names = ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
+                 "GEMINI4_API_KEY", "GROQ_API_KEY")
+        saved = {key: os.environ.get(key) for key in names}
         for key in saved:
             os.environ.pop(key, None)
-        os.environ["GEMINI_API_KEY"] = "one"
-        os.environ["GROQ_API_KEY"] = "g"
+        os.environ.update(GEMINI_API_KEY="one", GEMINI2_API_KEY="two",
+                          GEMINI3_API_KEY="three", GEMINI4_API_KEY="four",
+                          GROQ_API_KEY="g")
         try:
             sys.modules.pop("backtest.pin_models", None)
             pin_models = importlib.import_module("backtest.pin_models")
-            self.assertFalse(pin_models.BALANCED)
             generated = pin_models.patch(read("main.py"), pin_models.DEFAULTS)
-            self.assertNotIn("bucket_backend(", generated)
+            self.assertNotIn("bucket_backend", generated)
             self.assertNotIn("limiter_key", generated)
             for extra in ("GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY"):
                 self.assertNotIn(extra, generated)
@@ -728,7 +700,7 @@ class GeneratedCodeInvariants(unittest.TestCase):
         ast.parse(self._generate(GEMINI_API_KEY="a", GROQ_API_KEY="g"))
 
     def test_generation_is_deterministic(self):
-        env = dict(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GROQ_API_KEY="g")
+        env = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
         self.assertEqual(self._generate(**env), self._generate(**env))
 
     def test_generation_is_idempotent(self):
@@ -749,16 +721,12 @@ class GeneratedCodeInvariants(unittest.TestCase):
                     os.environ[key] = value
             sys.modules.pop("backtest.pin_models", None)
 
-    def test_generated_code_names_every_bucket_and_no_secret_value(self):
+    def test_generated_code_contains_no_secret_value(self):
         generated = self._generate(
-            GEMINI_API_KEY="secret-one", GEMINI2_API_KEY="secret-two",
-            GEMINI3_API_KEY="secret-three", GEMINI4_API_KEY="secret-four",
-            GROQ_API_KEY="secret-groq",
+            OPENROUTER_API_KEY="secret-openrouter", GEMINI_API_KEY="secret-one",
+            GEMINI2_API_KEY="secret-two", GROQ_API_KEY="secret-groq",
         )
-        for env_var in ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
-                        "GEMINI4_API_KEY"):
-            self.assertIn('"{0}"'.format(env_var), generated)
-        for value in ("secret-one", "secret-two", "secret-three", "secret-four",
+        for value in ("secret-openrouter", "secret-one", "secret-two",
                       "secret-groq"):
             self.assertNotIn(value, generated,
                              "a credential VALUE was written into main.py")
@@ -824,7 +792,7 @@ class GeneratedCodeInvariants(unittest.TestCase):
         # legitimate difference.
         cleaned = strip_llms(generated)
         for import_line in ("from backtest.fallback_llm import FallbackLlm\n",
-                            "from backtest.balanced_llm import BalancedLlm, bucket_backend\n"):
+                            "from backtest.balanced_llm import BalancedLlm\n"):
             cleaned = cleaned.replace(import_line, "")
         self.assertEqual(cleaned, strip_llms(original))
 

@@ -1,4 +1,5 @@
-"""Bucket wiring in pin_models: what gets generated, and what must not change.
+"""Chain and ensemble wiring in pin_models: what gets generated, and what must
+not change.
 
 pin_models reads os.environ at import time (deliberately: the generated main.py
 is meant to be an honest record of what ran), so these tests reload it under a
@@ -73,56 +74,27 @@ def load(**env):
                 os.environ[name] = saved[name]
 
 
-class BucketDetectionTests(unittest.TestCase):
-    def test_one_key_means_no_balancing(self):
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-        self.assertFalse(pm.BALANCED)
-        self.assertEqual(len(pm.ACTIVE_GEMINI_BUCKETS), 1)
-
-    def test_absent_secondary_keys_degrade_to_the_buckets_available(self):
-        """Safety requirement 2."""
-        pm = load(GEMINI_API_KEY="a", GEMINI3_API_KEY="c", GROQ_API_KEY="g")
-        self.assertTrue(pm.BALANCED)
-        self.assertEqual([e for e, _k in pm.ACTIVE_GEMINI_BUCKETS],
-                         ["GEMINI_API_KEY", "GEMINI3_API_KEY"])
-
-    def test_four_keys_give_four_buckets_in_a_fixed_order(self):
-        pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GEMINI3_API_KEY="c",
-                  GEMINI4_API_KEY="d", GROQ_API_KEY="g")
-        self.assertEqual([k for _e, k in pm.ACTIVE_GEMINI_BUCKETS],
-                         list(pm.GEMINI_BUCKET_KEYS))
-
-    def test_no_gemini_key_at_all_means_no_buckets(self):
-        pm = load(GROQ_API_KEY="g")
-        self.assertFalse(pm.BALANCED)
-        self.assertEqual(pm.ACTIVE_GEMINI_BUCKETS, [])
-
-
 class GeneratedBlockTests(unittest.TestCase):
-    def test_single_key_output_contains_no_bucket_machinery(self):
-        """REQUIREMENT 6: one Gemini credential must produce no PER-CREDENTIAL
-        machinery.
+    def test_single_key_output_contains_no_per_credential_machinery(self):
+        """One Gemini credential produces no PER-CREDENTIAL wiring: no
+        bucket_backend, no limiter_key, and no GEMINI2/3/4 env var name.
 
-        Narrowed deliberately when the forecaster ensemble landed. BalancedLlm
-        is no longer evidence of bucketing: the ensemble reuses that class to
-        spread the five forecast calls over the three distinct primary models,
-        which needs exactly one credential each. What must still be absent with
-        one Gemini key is the bucket wiring -- bucket_backend, limiter_key, and
-        any GEMINI2/3/4 env var name -- because that, not BalancedLlm, is what
-        R11 declined to run in production.
+        BalancedLlm is not evidence of any such wiring: the forecaster
+        ensemble uses that class to spread the five forecast calls over the
+        distinct primary models, which needs exactly one credential each.
         """
         pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
         block = pm.build_block(pm.DEFAULTS)
         self.assertNotIn("bucket_backend", block)
         self.assertNotIn("limiter_key", block)
-        for env_var in pm.GEMINI_BUCKET_ENV_VARS[1:]:
+        for env_var in ("GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY"):
             self.assertNotIn(env_var, block)
         self.assertIn("FallbackLlm", block)
 
     def test_single_key_output_still_ensembles_the_forecaster(self):
-        """The other half of the narrowing above: with one Gemini credential
-        the default role must STILL ensemble across primary models, or the
-        change silently reverts to five samples of one model."""
+        """The other half of the above: with one Gemini credential the default
+        role must STILL ensemble across primary models, or the change silently
+        reverts to five samples of one model."""
         pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
         block = pm.build_block(pm.DEFAULTS)
         default_entry = block[block.index('"default"'):block.index('"summarizer"')]
@@ -134,37 +106,26 @@ class GeneratedBlockTests(unittest.TestCase):
         rest = block[block.index('"summarizer"'):]
         self.assertNotIn("BalancedLlm", rest)
 
-    def test_balanced_output_wraps_one_chain_per_credential(self):
-        pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GEMINI3_API_KEY="c",
-                  GEMINI4_API_KEY="d", GROQ_API_KEY="g")
-        block = pm.build_block(pm.DEFAULTS)
-        self.assertIn("BalancedLlm", block)
-        for env_var in pm.GEMINI_BUCKET_ENV_VARS:
-            self.assertIn('"{0}"'.format(env_var), block)
-        for bucket_key in pm.GEMINI_BUCKET_KEYS:
-            self.assertIn('"{0}"'.format(bucket_key), block)
-
-    def test_the_parser_keeps_gemini_and_never_gains_groq(self):
-        pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GROQ_API_KEY="g")
+    def test_the_parser_keeps_gemini_and_never_gains_gpt_oss(self):
+        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
         block = pm.build_block(pm.DEFAULTS)
         parser = block[block.index('"parser"'):]
-        self.assertIn("bucket_backend", parser)
+        self.assertIn("gemini/gemini-3.5-flash-lite", parser)
         self.assertNotIn("gpt-oss-120b", parser,
                          "the parser must not gain a backend that answers in prose")
 
     def test_no_credential_value_is_ever_written_into_the_block(self):
         """Only variable NAMES may appear; a secret must not reach main.py."""
-        pm = load(GEMINI_API_KEY="SECRET-A", GEMINI2_API_KEY="SECRET-B",
+        pm = load(OPENROUTER_API_KEY="SECRET-O", GEMINI_API_KEY="SECRET-A",
                   GROQ_API_KEY="SECRET-G")
         block = pm.build_block(pm.DEFAULTS)
-        for secret in ("SECRET-A", "SECRET-B", "SECRET-G"):
+        for secret in ("SECRET-O", "SECRET-A", "SECRET-G"):
             self.assertNotIn(secret, block)
 
     def test_generated_code_is_valid_python(self):
         import ast
 
-        pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GEMINI3_API_KEY="c",
-                  GEMINI4_API_KEY="d", GROQ_API_KEY="g")
+        pm = load(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
         block = pm.build_block(pm.DEFAULTS).strip().rstrip(",")
         # The block is `llms={...}`; parse the dict literal it assigns.
         self.assertTrue(block.startswith("llms="))
@@ -175,6 +136,30 @@ class GeneratedBlockTests(unittest.TestCase):
         keys = [k.value for k in assigned.keys]
         self.assertEqual(sorted(keys),
                          ["default", "parser", "researcher", "summarizer"])
+
+
+class ExtraGeminiCredentialsAreInertTests(unittest.TestCase):
+    """GEMINI2/3/4_API_KEY used to add one Gemini chain per credential. That
+    path is gone (decision R11: production carries one Gemini credential), so
+    a stray secret of that name must change nothing, not half-activate."""
+
+    PRODUCTION = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="g", GROQ_API_KEY="q")
+    EXTRA = dict(GEMINI2_API_KEY="g2", GEMINI3_API_KEY="g3", GEMINI4_API_KEY="g4")
+
+    def test_the_generated_block_is_the_same_with_or_without_them(self):
+        for label, env in (
+            ("production", self.PRODUCTION),
+            ("gemini and groq", dict(GEMINI_API_KEY="g", GROQ_API_KEY="q")),
+            ("gemini only", dict(GEMINI_API_KEY="g")),
+        ):
+            with self.subTest(env=label):
+                pm = load(**env)
+                without = pm.build_block(pm.DEFAULTS)
+                pm = load(**dict(env, **self.EXTRA))
+                with_extra = pm.build_block(pm.DEFAULTS)
+                self.assertEqual(with_extra, without)
+                for name in self.EXTRA:
+                    self.assertNotIn(name, with_extra)
 
 
 HAIKU = "openrouter/anthropic/claude-haiku-4.5"
@@ -206,8 +191,6 @@ def chains_by_role(pm, models):
         name = getattr(node.func, "id", None)
         if name == "GeneralLlm":
             return next(k.value.value for k in node.keywords if k.arg == "model")
-        if name == "bucket_backend":
-            return node.args[0].value
         raise AssertionError("unexpected backend expression: " + ast.dump(node))
 
     def chains_of(node):
@@ -291,7 +274,7 @@ class ImportWiringTests(unittest.TestCase):
         return io.open(os.path.join(root, "main.py"), encoding="utf-8").read()
 
     def test_balanced_import_is_added_exactly_once_and_is_idempotent(self):
-        pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GROQ_API_KEY="g")
+        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
         once = pm.patch(self._main_src(), pm.DEFAULTS)
         self.assertIn("from backtest.balanced_llm import", once)
         self.assertEqual(once.count("from backtest.balanced_llm import"), 1)
@@ -303,12 +286,12 @@ class ImportWiringTests(unittest.TestCase):
         thing this generator can do that makes main.py raise at startup.
 
         Both directions are checked against the block itself rather than
-        against a re-derived condition, so this stays true whichever feature
-        (buckets or the forecaster ensemble) is the reason it appears.
+        against a re-derived condition, so this stays true whatever the reason
+        the generator has for emitting BalancedLlm.
         """
         for env in (
             {"GEMINI_API_KEY": "a", "GROQ_API_KEY": "g"},
-            {"GEMINI_API_KEY": "a", "GEMINI2_API_KEY": "b", "GROQ_API_KEY": "g"},
+            {"OPENROUTER_API_KEY": "o", "GEMINI_API_KEY": "a", "GROQ_API_KEY": "g"},
             {},  # no fallback keys at all: single GeneralLlm per role
         ):
             with self.subTest(env=sorted(env)):
@@ -325,7 +308,7 @@ class ImportWiringTests(unittest.TestCase):
     def test_dropping_every_fallback_key_removes_the_balanced_import_again(self):
         """Converge-either-way: a source patched WITH the import must lose it
         when the keys that justified it are gone."""
-        pm = load(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GROQ_API_KEY="g")
+        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
         balanced = pm.patch(self._main_src(), pm.DEFAULTS)
         self.assertIn("from backtest.balanced_llm import", balanced)
         pm = load()  # no fallback keys: nothing to balance or fall back to
@@ -333,13 +316,53 @@ class ImportWiringTests(unittest.TestCase):
         self.assertNotIn("from backtest.balanced_llm import", reverted)
 
 
-class SelftestAcrossBucketCountsTests(unittest.TestCase):
+    def test_every_name_the_generated_imports_ask_for_exists(self):
+        """main.py imports what the generator tells it to, at startup, before
+        a single question is read. A name that has been removed from the module
+        but is still imported turns the whole run into an ImportError, and
+        nothing else in the suite executes that line. This reads the modules'
+        own definitions with ast, so it needs neither forecasting_tools nor the
+        modules' imports to succeed."""
+        import io
+        import os.path
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        def defined_in(module):
+            path = os.path.join(root, *module.split(".")) + ".py"
+            with io.open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            names = set()
+            for node in tree.body:
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                    names.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    names.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+            return names
+
+        pm = load(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        generated = pm.patch(self._main_src(), pm.DEFAULTS)
+        imports = [node for node in ast.parse(generated).body
+                   if isinstance(node, ast.ImportFrom)
+                   and (node.module or "").startswith("backtest.")]
+        self.assertTrue(imports, "the generator added no backtest import at all")
+        for node in imports:
+            available = defined_in(node.module)
+            for alias in node.names:
+                self.assertIn(alias.name, available,
+                              "{0} imports {1}, which {0} does not define".format(
+                                  node.module, alias.name))
+
+
+class SelftestAcrossCredentialSetsTests(unittest.TestCase):
     """pin_models runs its own selftest on every invocation, before touching
-    main.py. Balancing multiplies how many times a model string appears in the
-    generated block -- once per chain per role -- and an assertion written for
-    the single-chain shape fails only when a second credential appears. That is
-    exactly how it escaped local checks and broke in CI (run 32385415823), so
-    every bucket count is exercised here.
+    main.py. What it generates depends on which provider credentials are
+    present, and an assertion written for one combination can fail only when
+    another appears -- which is how a selftest failure once escaped local
+    checks and broke CI (run 32385415823) -- so every combination the
+    workflows can produce is exercised here.
 
     selftest() operates on synthetic sources; it never writes main.py.
     """
@@ -372,41 +395,22 @@ class SelftestAcrossBucketCountsTests(unittest.TestCase):
     def test_openrouter_only(self):
         self._run_selftest(OPENROUTER_API_KEY="o")
 
-    def test_one_credential(self):
-        self._run_selftest(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-
-    def test_two_credentials(self):
-        self._run_selftest(GEMINI_API_KEY="a", GEMINI2_API_KEY="b",
-                           GROQ_API_KEY="g")
-
-    def test_three_credentials(self):
-        self._run_selftest(GEMINI_API_KEY="a", GEMINI2_API_KEY="b",
-                           GEMINI3_API_KEY="c", GROQ_API_KEY="g")
-
-    def test_four_credentials(self):
-        self._run_selftest(GEMINI_API_KEY="a", GEMINI2_API_KEY="b",
-                           GEMINI3_API_KEY="c", GEMINI4_API_KEY="d",
-                           GROQ_API_KEY="g")
+    def test_leftover_extra_gemini_secrets_are_ignored(self):
+        """The repository may still hold GEMINI2/3/4_API_KEY as secrets. Even
+        if a workflow passed them, they must not change what the selftest
+        expects."""
+        self._run_selftest(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a",
+                           GEMINI2_API_KEY="b", GEMINI3_API_KEY="c",
+                           GEMINI4_API_KEY="d", GROQ_API_KEY="g")
 
     def test_groq_only(self):
         self._run_selftest(GROQ_API_KEY="g")
 
 
 class DriftTests(unittest.TestCase):
-    """pin_models duplicates the bucket keys because it runs as a bare script
-    and cannot import backtest.*. That duplication must never drift."""
-
-    def test_bucket_keys_match_the_rate_limiter(self):
-        from backtest import rate_limiter as rl
-
-        pm = load(GEMINI_API_KEY="a")
-        self.assertEqual(tuple(pm.GEMINI_BUCKET_KEYS), tuple(rl.GEMINI_BUCKET_KEYS))
-
-    def test_bucket_model_matches_the_rate_limiter(self):
-        from backtest import rate_limiter as rl
-
-        pm = load(GEMINI_API_KEY="a")
-        self.assertEqual(pm.GEMINI_BUCKET_MODEL, rl.GEMINI_MODEL)
+    """pin_models duplicates the set of rate-limited models because it runs as
+    a bare script and cannot import backtest.*. That duplication must never
+    drift."""
 
     def test_rate_limited_models_matches_the_real_registry(self):
         """pin_models duplicates the set of rate-limiter-registered model
