@@ -7,6 +7,7 @@ controlled environment rather than mutating module state in place.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib
 import os
@@ -174,6 +175,111 @@ class GeneratedBlockTests(unittest.TestCase):
         keys = [k.value for k in assigned.keys]
         self.assertEqual(sorted(keys),
                          ["default", "parser", "researcher", "summarizer"])
+
+
+HAIKU = "openrouter/anthropic/claude-haiku-4.5"
+OPUS = "openrouter/anthropic/claude-opus-4.6"
+GPT_4O_MINI = "openrouter/openai/gpt-4o-mini"
+GEMINI = "gemini/gemini-3.5-flash-lite"
+GROQ_OSS = "groq/openai/gpt-oss-120b"
+GROQ_QWEN = "groq/qwen/qwen3.8-27b"
+
+
+def chains_by_role(pm, models):
+    """{role: [chain, ...]} where a chain is the list of model names one
+    FallbackLlm tries, in order.
+
+    Read out of the GENERATED SOURCE with ast rather than through pin_models'
+    own evaluator. The evaluator computes its expectation with the same helpers
+    the generator uses, so a mistake shared by both passes its own check; this
+    looks at what would actually be written into main.py. A role that is a
+    bare model string or a single GeneralLlm is a one-element chain, and a
+    BalancedLlm contributes one chain per member.
+    """
+    block = pm.build_block(models).strip().rstrip(",")
+    tree = ast.parse("x = " + block[len("llms="):])
+
+    def model_of(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        assert isinstance(node, ast.Call), ast.dump(node)
+        name = getattr(node.func, "id", None)
+        if name == "GeneralLlm":
+            return next(k.value.value for k in node.keywords if k.arg == "model")
+        if name == "bucket_backend":
+            return node.args[0].value
+        raise AssertionError("unexpected backend expression: " + ast.dump(node))
+
+    def chains_of(node):
+        name = getattr(getattr(node, "func", None), "id", None)
+        if name == "FallbackLlm":
+            return [[model_of(b) for b in node.args[0].elts]]
+        if name == "BalancedLlm":
+            return [c for member in node.args[0].elts for c in chains_of(member)]
+        return [[model_of(node)]]
+
+    out = {}
+    for key, value in zip(tree.body[0].value.keys, tree.body[0].value.values):
+        out[key.value] = chains_of(value)
+    return out
+
+
+class ChainsNameEachBackendOnceTests(unittest.TestCase):
+    """A fallback chain tries each backend once.
+
+    The researcher and summarizer use claude-haiku-4.5 as their PRIMARY, and
+    FALLBACK_CHAIN also begins with claude-haiku-4.5, so the chain generated
+    for those two roles was [haiku, haiku, gemini, groq]: a repeat call to the
+    backend that had just failed, which TRIES_IN_CHAIN = 1 exists to prevent.
+    """
+
+    PRODUCTION = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="g", GROQ_API_KEY="q")
+
+    def test_no_generated_chain_repeats_a_backend(self):
+        for label, env in (
+            ("production", self.PRODUCTION),
+            ("gemini and groq only", dict(GEMINI_API_KEY="g", GROQ_API_KEY="q")),
+            ("openrouter only", dict(OPENROUTER_API_KEY="o")),
+            ("groq only", dict(GROQ_API_KEY="q")),
+        ):
+            pm = load(**env)
+            for role, chains in chains_by_role(pm, pm.DEFAULTS).items():
+                for chain in chains:
+                    with self.subTest(env=label, role=role):
+                        self.assertEqual(
+                            len(chain), len(set(chain)),
+                            "{0} chain names a backend twice: {1}".format(role, chain),
+                        )
+
+    def test_the_production_chains_are_exactly_these_and_in_this_order(self):
+        """Pins the shape production runs, so de-duplicating cannot reorder or
+        drop a link: the primary leads, the rest keep their configured order."""
+        pm = load(**self.PRODUCTION)
+        chains = chains_by_role(pm, pm.DEFAULTS)
+        self.assertEqual(chains["researcher"], [[HAIKU, GEMINI, GROQ_OSS]])
+        self.assertEqual(chains["summarizer"], [[HAIKU, GEMINI, GROQ_OSS]])
+        self.assertEqual(
+            chains["parser"], [[GPT_4O_MINI, HAIKU, GEMINI, GROQ_QWEN]])
+        # The forecaster ensemble: one chain per primary, that primary first and
+        # the others behind it in primary order.
+        self.assertEqual(chains["default"], [
+            [OPUS, HAIKU, GEMINI, GROQ_OSS],
+            [HAIKU, OPUS, GEMINI, GROQ_OSS],
+            [GEMINI, OPUS, HAIKU, GROQ_OSS],
+            [GROQ_OSS, OPUS, HAIKU, GEMINI],
+        ])
+
+    def test_an_override_naming_a_fallback_model_does_not_repeat_it(self):
+        """models.txt can set any role to any model, including one that is also
+        a fallback. The first occurrence wins and the order is otherwise kept."""
+        pm = load(**self.PRODUCTION)
+        chains = chains_by_role(pm, dict(pm.DEFAULTS, researcher=GEMINI))
+        self.assertEqual(chains["researcher"], [[GEMINI, HAIKU, GROQ_OSS]])
+        # The parser excluded DEFAULTS["parser"] rather than the configured
+        # primary, so overriding it with a model that is also a fallback
+        # repeated that model.
+        chains = chains_by_role(pm, dict(pm.DEFAULTS, parser=HAIKU))
+        self.assertEqual(chains["parser"], [[HAIKU, GEMINI, GROQ_QWEN]])
 
 
 class ImportWiringTests(unittest.TestCase):

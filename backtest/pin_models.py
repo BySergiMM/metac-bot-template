@@ -489,6 +489,27 @@ def _bucket_expr(env_var: str, limiter_key: str) -> str:
     )
 
 
+def _chain_models(model: str, fallbacks: list[str]) -> list[str]:
+    """The models one FallbackLlm chain tries, in order, each exactly once.
+
+    The primary leads and the fallbacks follow in their configured order; a
+    model that would appear a second time is dropped, so the first occurrence
+    wins and the order of everything else is untouched.
+
+    This exists because FALLBACK_CHAIN begins with claude-haiku-4.5 while the
+    researcher and summarizer roles use that same model as their PRIMARY. The
+    chain emitted for them was [haiku, haiku, gemini, groq]: a second call to
+    the backend that had just failed, with the same model, the same credential
+    and the same rate-limit window. TRIES_IN_CHAIN is 1 precisely so that a
+    provider gets one attempt and the next attempt goes to a different provider
+    (see the comment above it), and the repeat also inflated
+    COUNTERS.llm_fallback_total, which counts any attempt past position 0 as a
+    fallback. The parser already excluded its own primary in _fallbacks_for;
+    doing it here covers every role and every models.txt override.
+    """
+    return list(dict.fromkeys([model, *fallbacks]))
+
+
 def _chain_expr(
     model: str,
     fallbacks: list[str],
@@ -500,10 +521,12 @@ def _chain_expr(
     When `bucket` is given, the Gemini link is bound to that credential and
     quota bucket; every other link is byte-identical to the unbalanced form.
     The ORDER is never altered -- balancing chooses between whole chains, it
-    does not reorder the links inside one.
+    does not reorder the links inside one. No backend is listed twice; see
+    _chain_models.
     """
-    backends = [_backend_expr(model, TRIES_IN_CHAIN)]
-    for fb_model in fallbacks:
+    ordered = _chain_models(model, fallbacks)
+    backends = [_backend_expr(ordered[0], TRIES_IN_CHAIN)]
+    for fb_model in ordered[1:]:
         if bucket is not None and fb_model == GEMINI_MODEL:
             backends.append(_bucket_expr(*bucket))
         else:
@@ -766,6 +789,9 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
         # shorter than the reasoning chain (or absent entirely, if the only
         # active fallback cannot parse).
         expected_fallbacks = _fallbacks_for(role) if active_fallbacks else []
+        # The chain as the generator emits it: primary first, each backend once.
+        primary = _parser_primary(models[role]) if role == "parser" else models[role]
+        expected_chain = _chain_models(primary, expected_fallbacks)
         if expected_fallbacks:
             entry = result[role]
             if BALANCED and GEMINI_BUCKET_MODEL in expected_fallbacks:
@@ -789,8 +815,8 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
                 seen_envs = []
                 for chain, expected_key in zip(entry.chains, entry.bucket_keys):
                     assert isinstance(chain, _StubFallbackLlm)
-                    served = [b.model for b in chain.backends[1:]]
-                    assert served == expected_fallbacks, (
+                    served = [b.model for b in chain.backends]
+                    assert served == expected_chain, (
                         f"{role} chain order changed: {served}"
                     )
                     # Find the Gemini link by MODEL, not by position. It used
@@ -845,12 +871,10 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
                     )
                 continue
             assert isinstance(entry, _StubFallbackLlm), f"{role} should be wrapped"
-            assert len(entry.backends) == 1 + len(expected_fallbacks), (
-                f"{role}: expected {1 + len(expected_fallbacks)} backends, "
-                f"got {len(entry.backends)}"
+            served = [b.model for b in entry.backends]
+            assert served == expected_chain, (
+                f"{role}: chain is {served}, expected {expected_chain}"
             )
-            served = [b.model for b in entry.backends[1:]]
-            assert served == expected_fallbacks, f"{role} chain is {served}"
         elif active_fallbacks and role == "parser":
             # Fallbacks exist but none can parse: the parser stays unwrapped
             # rather than gaining a backend that would answer in prose.
