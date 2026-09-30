@@ -12,6 +12,7 @@ Grouped by the promise, not by the module:
   Integrity     five predictions stay five; nothing partial is ever published
   Publication   one prediction, one comment, orphans named out loud
   Concurrency   loop-safe semaphore, bounded research, atomic chain selection
+  Dead code     no statement that can never run, so nothing reads as live
   Discovery     every page read, no question processed twice
   Workflow      scored tournaments only from the one production workflow
   Deployment    the code CI generates still keeps all of the above
@@ -268,6 +269,89 @@ class ConcurrencyInvariants(unittest.TestCase):
         for child in ast.walk(node):
             self.assertNotIsInstance(child, ast.Await)
             self.assertNotIsInstance(child, ast.Yield)
+
+
+# ===========================================================  DEAD CODE
+
+
+def unreachable_statements(tree: ast.AST) -> list:
+    """Line numbers of statements that follow a return, raise, continue or
+    break in the same block, and so can never run."""
+    terminal = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+    hits = []
+
+    def walk_block(statements):
+        for position, statement in enumerate(statements):
+            if isinstance(statement, terminal) and position + 1 < len(statements):
+                hits.append(statements[position + 1].lineno)
+            for field in ("body", "orelse", "finalbody"):
+                inner = getattr(statement, field, None)
+                if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                    walk_block(inner)
+            for handler in getattr(statement, "handlers", None) or []:
+                walk_block(handler.body)
+            for case in getattr(statement, "cases", None) or []:
+                walk_block(case.body)
+
+    walk_block(getattr(tree, "body", []))
+    return sorted(hits)
+
+
+class NoUnreachableCode(unittest.TestCase):
+    """pin_models._parser_primary once ended `return configured` and then went
+    on to read GROQ_API_KEY and return a Groq model. Nothing after the first
+    return could run, but it read like live behaviour -- as if an environment
+    variable could reroute the parser to Groq -- and a reader had no way to
+    tell from the source that it could not."""
+
+    SKIP = {"__pycache__", "node_modules", "site-packages"}
+
+    def _sources(self):
+        for directory, subdirs, files in os.walk(ROOT):
+            subdirs[:] = sorted(
+                d for d in subdirs if not d.startswith(".") and d not in self.SKIP
+            )
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    yield os.path.join(directory, name)
+
+    def test_no_python_file_has_statements_after_a_return_or_raise(self):
+        checked = 0
+        for path in self._sources():
+            with io.open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            checked += 1
+            self.assertEqual(
+                unreachable_statements(tree), [],
+                "{0}: statements that can never run".format(
+                    os.path.relpath(path, ROOT)),
+            )
+        self.assertGreater(checked, 20, "the scan found almost no source files")
+
+    def test_the_scanner_finds_what_it_is_meant_to_find(self):
+        """Guards the guard, including the nested shapes."""
+        straight = "def f(x):\n    return x\n    y = 1\n"
+        nested = (
+            "def f(items):\n"
+            "    for item in items:\n"
+            "        if item:\n"
+            "            continue\n"
+            "            print(item)\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError:\n"
+            "        raise\n"
+            "        cleanup()\n"
+        )
+        clean = (
+            "def f(x):\n"
+            "    if x:\n"
+            "        return 1\n"
+            "    return 2\n"
+        )
+        self.assertEqual(unreachable_statements(ast.parse(straight)), [3])
+        self.assertEqual(unreachable_statements(ast.parse(nested)), [5, 10])
+        self.assertEqual(unreachable_statements(ast.parse(clean)), [])
 
 
 # ===========================================================  DISCOVERY

@@ -243,9 +243,7 @@ def _parser_primary(configured: str) -> str:
     chain is now deeper than before the outage rather than merely restored.
     """
     return configured
-    if os.getenv("GROQ_API_KEY"):
-        return "groq/qwen/qwen3.8-27b"
-    return configured
+
 
 # forecasting-tools only applies a custom timeout to roles given as GeneralLlm;
 # a bare model string silently gets its 60s default. The free tier queues past
