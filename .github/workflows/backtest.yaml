@@ -21,10 +21,12 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
         run: python backtest/minibench_backtest.py fetch --out dataset.json
+      # The dataset is deliberately NOT uploaded. dataset.json holds Metaculus'
+      # question titles, URLs, resolutions and community predictions, and this
+      # repository is public, so a workflow artifact is world-readable.
+      # Metaculus' Terms of Use restrict redistributing its API data (see
+      # .gitignore and research/export_safe_report.py), so the data stays on
+      # the runner and is discarded with it. The evaluate step below prints
+      # aggregates only.
       - name: Evaluate baseline strategies
         run: python backtest/minibench_backtest.py evaluate --dataset dataset.json
-      - name: Upload dataset
-        uses: actions/upload-artifact@v4
-        with:
-          name: minibench-dataset
-          path: dataset.json

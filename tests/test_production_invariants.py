@@ -653,6 +653,127 @@ class WorkflowInvariants(unittest.TestCase):
             for extra in ("GEMINI2_API_KEY:", "GEMINI3_API_KEY:", "GEMINI4_API_KEY:"):
                 self.assertNotIn(extra, src, name)
 
+    #: Workflow artifacts are world-readable, because this repository is
+    #: public. Metaculus' Terms of Use restrict redistributing its API data
+    #: (.gitignore, research/export_safe_report.py), and a dataset of question
+    #: titles, URLs, resolutions and community predictions is exactly that. So
+    #: what a workflow may upload is an ALLOWLIST, not "everything except the
+    #: dataset": adding an upload means adding it here, on purpose, in review.
+    #: A denylist fails open the day someone uploads a different file.
+    ALLOWED_ARTIFACT_UPLOADS = {
+        "research_track_record.yaml": {
+            "milestone2_summary.json",
+            "milestone2_report.txt",
+        },
+    }
+
+    @staticmethod
+    def _artifact_paths_in(workflow_text: str) -> set:
+        """Every `path:` entry of every actions/upload-artifact step in one
+        workflow's text (comments already removed). A step with no `path:` at
+        all is reported as "<none>", since an upload whose contents cannot be
+        read cannot be allowed."""
+        lines = workflow_text.splitlines()
+
+        def indent(text: str) -> int:
+            return len(text) - len(text.lstrip())
+
+        found = set()
+        for start, line in enumerate(lines):
+            if "actions/upload-artifact" not in line:
+                continue
+            # The step's own keys sit at the column of `uses:`, or two columns
+            # right of the dash when the step starts with `- uses:`.
+            key_indent = indent(line) + (2 if line.lstrip().startswith("- ") else 0)
+            paths = set()
+            index = start + 1
+            while index < len(lines):
+                text = lines[index]
+                if text.strip() and indent(text) < key_indent:
+                    break
+                match = re.match(r"\s*path:\s*(.*)$", text)
+                if match and indent(text) == key_indent + 2:
+                    value = match.group(1).strip()
+                    if value in ("|", "|-", ">", ">-"):
+                        index += 1
+                        while index < len(lines) and (
+                            not lines[index].strip()
+                            or indent(lines[index]) > indent(text)
+                        ):
+                            if lines[index].strip():
+                                paths.add(lines[index].strip())
+                            index += 1
+                        continue
+                    if value:
+                        paths.add(value.strip("\"'"))
+                index += 1
+            found |= paths or {"<none>"}
+        return found
+
+    def _uploaded_artifact_paths(self, name: str) -> set:
+        return self._artifact_paths_in(
+            yaml_without_comments(".github", "workflows", name))
+
+    def test_no_workflow_uploads_anything_outside_the_allowlist(self):
+        """backtest.yaml used to upload dataset.json -- Metaculus question
+        titles, URLs, resolutions and community predictions -- as a public
+        artifact, against the Terms-of-Use note in .gitignore."""
+        workflow_dir = os.path.join(ROOT, ".github", "workflows")
+        for name in sorted(os.listdir(workflow_dir)):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            uploaded = self._uploaded_artifact_paths(name)
+            allowed = self.ALLOWED_ARTIFACT_UPLOADS.get(name, set())
+            self.assertLessEqual(
+                uploaded, allowed,
+                "{0} uploads {1}, which is not on the allowlist; workflow "
+                "artifacts of a public repository are world-readable".format(
+                    name, sorted(uploaded - allowed)),
+            )
+
+    def test_the_artifact_allowlist_is_not_vacuous(self):
+        """Guards the guard: the one permitted upload must still be found by
+        the same parser, or an unreadable step layout would pass silently."""
+        for name, allowed in self.ALLOWED_ARTIFACT_UPLOADS.items():
+            self.assertEqual(self._uploaded_artifact_paths(name), allowed, name)
+
+    def test_the_artifact_parser_reads_inline_and_block_paths(self):
+        """The two YAML spellings of `path:` must both be seen, a `path:` that
+        belongs to some other step must not be, and a step with no path must
+        not be mistaken for a harmless one."""
+        inline = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: x\n"
+            "          path: dataset.json\n"
+            "      - name: Next\n"
+            "        run: echo\n"
+            "        env:\n"
+            "          path: not-an-upload\n"
+        )
+        block = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: x\n"
+            "          path: |\n"
+            "            one.json\n"
+            "            two.txt\n"
+        )
+        nopath = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: x\n"
+        )
+        self.assertEqual(self._artifact_paths_in(inline), {"dataset.json"})
+        self.assertEqual(self._artifact_paths_in(block), {"one.json", "two.txt"})
+        self.assertEqual(self._artifact_paths_in(nopath), {"<none>"})
+        self.assertEqual(self._artifact_paths_in("jobs:\n  a:\n    steps: []\n"),
+                         set())
+
     def test_no_workflow_grants_write_permissions_to_the_bot(self):
         for name in sorted(os.listdir(os.path.join(ROOT, ".github", "workflows"))):
             if not name.endswith((".yaml", ".yml")):
