@@ -14,15 +14,22 @@ import importlib
 import os
 import unittest
 
+# Every credential pin_models reads at import time. Held out of the real
+# environment for the duration of a simulated set, so a developer's own keys
+# -- including an AskNews one, which changes the researcher's chain -- cannot
+# leak into what a test believes it is exercising.
+MANAGED_ENV = (
+    "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY",
+    "GROQ_API_KEY", "OPENROUTER_API_KEY",
+    "ASKNEWS_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET",
+)
+
 
 @contextlib.contextmanager
 def pinned_env(**env):
     """Reload pin_models AND hold the credential environment for the whole
     block, so call-time os.environ reads see the simulated set too."""
-    managed = [
-        "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY",
-        "GROQ_API_KEY", "OPENROUTER_API_KEY",
-    ]
+    managed = list(MANAGED_ENV)
     saved = {name: os.environ.pop(name, None) for name in managed}
     os.environ.update(env)
     try:
@@ -57,10 +64,7 @@ def load(**env):
     `pinned_env` for anything that must hold the environment across a CALL.
     """
     saved = {}
-    managed = [
-        "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY",
-        "GROQ_API_KEY", "OPENROUTER_API_KEY",
-    ]
+    managed = list(MANAGED_ENV)
     for name in managed:
         saved[name] = os.environ.pop(name, None)
     os.environ.update(env)
@@ -164,7 +168,7 @@ class ExtraGeminiCredentialsAreInertTests(unittest.TestCase):
 
 
 HAIKU = "openrouter/anthropic/claude-haiku-4.5"
-OPUS = "openrouter/anthropic/claude-opus-4.6"
+OPUS = "openrouter/anthropic/claude-opus-5.5"
 GPT_4O_MINI = "openrouter/openai/gpt-4o-mini"
 GEMINI = "gemini/gemini-3.5-flash-lite"
 GROQ_OSS = "groq/openai/gpt-oss-120b"

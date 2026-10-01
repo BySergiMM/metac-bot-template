@@ -748,6 +748,10 @@ class WorkflowInvariants(unittest.TestCase):
         chain_keys = sorted({
             env for _model, env in pin.FALLBACK_CHAIN + pin.PARSER_EXTRA_CHAIN
         })
+        # The AskNews credential gates the researcher's chain at patch time
+        # in exactly the same way (pin_models.ACTIVE_ASKNEWS), so it is held
+        # to the same rule: present in both steps or in neither.
+        chain_keys += sorted(pin.ASKNEWS_ENV_VARS)
         self.assertTrue(chain_keys, "no chain-gating credentials found")
         workflow_dir = os.path.join(ROOT, ".github", "workflows")
         checked = 0
@@ -775,6 +779,42 @@ class WorkflowInvariants(unittest.TestCase):
         self.assertGreaterEqual(
             checked, 3, "expected tournament, cup and test_bot to be covered"
         )
+
+    def test_asknews_credentials_travel_together(self):
+        """AskNewsSearcher takes ASKNEWS_API_KEY or ASKNEWS_CLIENT_ID plus
+        ASKNEWS_SECRET. Which one the repository secret will be is not
+        decided (none exists yet), so every env block that names one AskNews
+        variable must name all three: a block carrying only the OAuth pair
+        would silently leave an API-key secret unused -- the researcher would
+        run without news while the credential sat in Settings."""
+        import backtest.pin_models as pin
+
+        names = set(pin.ASKNEWS_ENV_VARS)
+        workflow_dir = os.path.join(ROOT, ".github", "workflows")
+        checked = 0
+        for name in sorted(os.listdir(workflow_dir)):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            text = yaml_without_comments(".github", "workflows", name)
+            for block in text.split("- name:"):
+                present = {var for var in names if var + ":" in block}
+                if not present:
+                    continue
+                self.assertEqual(
+                    present, names,
+                    "{0}: a step names {1} but not {2}".format(
+                        name, sorted(present), sorted(names - present)),
+                )
+                for var in names:
+                    self.assertIn(
+                        "{0}: ${{{{ secrets.{0} }}}}".format(var), block,
+                        "{0}: {1} must come from the repository secret".format(
+                            name, var),
+                    )
+                checked += 1
+        # Pin + Run bot in test_bot and the Cup workflow, Pin + Run bot + Cup
+        # in the tournament workflow.
+        self.assertGreaterEqual(checked, 7, "expected every pin and run step")
 
     def test_every_workflow_that_can_publish_to_a_scored_tournament_pins_models(self):
         """Without pin_models, forecasting-tools assigns the researcher role to
@@ -957,6 +997,7 @@ class GeneratedCodeInvariants(unittest.TestCase):
         saved = {k: os.environ.get(k) for k in (
             "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
             "GEMINI4_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY",
+            "ASKNEWS_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET",
         )}
         for key in saved:
             os.environ.pop(key, None)

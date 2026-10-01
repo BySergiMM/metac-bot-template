@@ -47,8 +47,9 @@ Each forecast call goes into a chain: if its model fails, the call falls through
 
 | Role | Primary | Falls back to |
 |---|---|---|
-| Forecaster (five calls) | Spread across Claude Opus 4.6, Claude Haiku 4.5, Gemini Flash Lite and gpt oss 120b on Groq | The other models in the same order |
-| Research and summary | Claude Haiku 4.5 | Gemini, then Groq |
+| Forecaster (five calls) | Spread across Claude Opus 5.5, Claude Haiku 4.5, Gemini Flash Lite and gpt oss 120b on Groq | The other models in the same order |
+| Research | AskNews live news when an AskNews credential is set, otherwise Claude Haiku 4.5 | Claude Haiku 4.5 (if AskNews led), then Gemini, then Groq |
+| Summary | Claude Haiku 4.5 | Gemini, then Groq |
 | Parser | gpt 4o mini | Models verified to return structured JSON |
 
 Why five calls over different models and not one model five times: averaging five samples of the same model keeps its blind spots. Mixing models is what FutureSearch, one of the top bots, describes doing, and the cheaper models keep a question well under the cost of five Opus calls.
@@ -87,7 +88,7 @@ poetry run python -m unittest discover -s tests -t .
 
 Being upfront about these, because they are the next things to fix:
 
-* **Research has no live search.** The researcher is a model working from its own knowledge, so recent news can be missing. Adding AskNews (free for tournament participants) is the next change.
+* **Live news depends on a credential.** With `ASKNEWS_API_KEY` (or `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET`) set, research starts from AskNews articles and falls back to the model if the feed fails. Without one, the researcher is a model working from its own knowledge, so recent news can be missing. AskNews is free for tournament participants.
 * **No forecasting quality claims yet.** The work so far is about reliability and coverage. Prompts, aggregation and calibration are close to the template's, and there is no measured Brier yet to show an improvement.
 * **Detection is limited by GitHub's scheduler.** Cron asks for a run every five minutes and gets about six a day. A polling window inside each run helps; an external trigger would help more.
 * **Models are pinned by rewriting `main.py` in CI** ([`backtest/pin_models.py`](backtest/pin_models.py)). It works and is tested, but configuring them at runtime would be cleaner.
