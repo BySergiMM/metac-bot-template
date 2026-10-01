@@ -379,7 +379,7 @@ intended — datasets are raw, analysis is derived.
 | `research/coverage.py` | production and benchmark coverage |
 | `research/fetch_own_track_record.py` | CLI: build an immutable dataset |
 | `research/analyze_track_record.py` | CLI: score, validate, report |
-| `tests/` | 190 tests, standard library only |
+| `tests/` | the suite. Nine modules cover this lab (`test_coverage`, `test_end_to_end`, `test_export_safe_report`, `test_posts_track_record`, `test_provenance`, `test_read_api`, `test_scorer`, `test_track_record`, `test_validate`) and need only the standard library: 209 tests, measured 2026-10-01 by running `python -m unittest` on those nine with `requests`, `forecasting_tools` and `litellm` made unimportable. The other modules test the bot itself, and a few of them need `forecasting-tools` |
 
 `backtest/minibench_backtest.py` is untouched and is superseded by this lab for
 anything involving our own performance.

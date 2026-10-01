@@ -78,9 +78,9 @@ jobs:
       # REAL forecasting_tools client via tests/_real_forecasting_tools.py,
       # so their whole module cannot even be imported here -- that's the
       # SAME guarantee the step above just checked, working as intended.
-      # Four more individual test methods reach for the real client the same
-      # way. None of that is a regression to paper over: ci.yaml runs the
-      # complete, unfiltered suite (all ~565 tests) with forecasting_tools
+      # Five more individual test methods (BLOCKED_TESTS below) reach for the
+      # real client the same way. None of that is a regression to paper over:
+      # ci.yaml runs the complete, unfiltered suite with forecasting_tools
       # genuinely installed, on every push and pull request to main, and
       # that -- not this job -- is the gate those tests protect.
       #
@@ -91,9 +91,9 @@ jobs:
       # kill-switch tests run for real instead of being skipped.
       #
       # The selection below is an explicit, named exclude list (not a broad
-      # file-pattern skip) so the ~50 other forecasting_tools-independent
-      # checks in test_production_invariants.py and test_adversarial_logging.py
-      # keep running in this job too. A test moving in or out of this set
+      # file-pattern skip) so the other forecasting_tools-independent checks
+      # in test_production_invariants.py and test_adversarial_logging.py keep
+      # running in this job too. A test moving in or out of this set
       # without the list being updated fails loudly, not silently.
       - name: Unit tests (offline subset; forecasting_tools stays uninstalled)
         run: |
