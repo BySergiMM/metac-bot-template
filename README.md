@@ -46,8 +46,8 @@ Instructions for getting your METACULUS_TOKEN, OPENROUTER_API_KEY, or optional s
 ## Changing the Github automation
 To run a different script under the same workflows, edit the `poetry run python main.py` line in the appropriate file under `.github/workflows/` and replace `main.py` with your script. The workflows that exist:
 - `test_bot.yaml` — manual-trigger smoke test against the bot-testing-area tournament.
-- `run_bot_on_tournament.yaml` — scheduled, on the live AIB tournament + MiniBench: the cron asks for a run every 5 min, and GitHub delivered 4–9 a day through September 2026 ([docs/cadence.md](docs/cadence.md)).
-- `run_bot_on_metaculus_cup.yaml` — manual only, on the Metaculus Cup; its every-2-days cron was removed.
+- `run_bot_on_tournament.yaml` — scheduled, on the live FutureEval season + MiniBench (ids pinned in [`tournaments.py`](tournaments.py)): the cron asks for a run every 5 min, and GitHub delivered 4–9 a day through September 2026 ([docs/cadence.md](docs/cadence.md)). After each poll window it forecasts any Metaculus Cup question it has not forecast yet (practice: the Cup ranks bots but pays none).
+- `run_bot_on_metaculus_cup.yaml` — manual only, the same Cup step on demand; its every-2-days cron was removed.
 
 **To run `main_with_no_framework.py` via GitHub Actions instead of `main.py`:** open the workflow file you want and change `poetry run python main.py` to `poetry run python main_with_no_framework.py`. That's the only change required.
 
@@ -100,7 +100,7 @@ poetry run python main.py --mode test_questions
 ```
 You'll see a one-line startup banner, forecasting progress logs, then a `🎉 Bot submitted N forecast(s)` banner with direct links to each forecast on Metaculus.
 
-**Forecast on live AIB tournament + MiniBench:**
+**Forecast on the live FutureEval season + MiniBench:**
 ```bash
 poetry run python main.py --mode tournament
 ```

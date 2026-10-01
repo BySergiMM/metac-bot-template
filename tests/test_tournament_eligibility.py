@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import os.path
+import re
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -74,21 +75,22 @@ class NoReforecastTests(unittest.TestCase):
     def test_the_tournament_path_skips_already_forecasted_questions(self):
         self.assertIn("skip_previously_forecasted_questions=True", read("main.py"))
 
-    def test_the_only_overrides_are_outside_the_tournament(self):
-        """Two branches set it False. Both must be non-tournament modes."""
+    def test_the_only_override_is_the_practice_area(self):
+        """One branch sets it False: the unscored bot-testing-area. The Cup
+        used to be the second, until production started running it on a
+        schedule (2026-10-01); it now forecasts each question once."""
         src = read("main.py")
         overrides = [
             i for i, line in enumerate(src.splitlines())
             if "skip_previously_forecasted_questions = False" in line
         ]
-        self.assertEqual(len(overrides), 2, "unexpected number of overrides")
+        self.assertEqual(len(overrides), 1, "unexpected number of overrides")
         lines = src.splitlines()
         for index in overrides:
             context = "\n".join(lines[max(0, index - 12):index + 3])
-            self.assertTrue(
-                'run_mode == "metaculus_cup"' in context
-                or 'run_mode == "test_questions"' in context,
-                "an override sits outside metaculus_cup/test_questions",
+            self.assertIn(
+                'run_mode == "test_questions"', context,
+                "an override sits outside test_questions",
             )
 
     def test_the_tournament_branch_does_not_disable_dedup(self):
@@ -221,9 +223,14 @@ class TestsNeverPublishTests(unittest.TestCase):
 
 class ProductionTargetTests(unittest.TestCase):
     def test_the_tournament_workflow_runs_the_unmodified_entry_point(self):
+        """The scored poll loop uses the default mode. The only --mode in the
+        file is the Cup's practice step, which runs after the loop."""
         src = read(".github", "workflows", "run_bot_on_tournament.yaml")
-        self.assertIn("poetry run python main.py", src)
-        self.assertNotIn("--mode", src, "production must use the default mode")
+        self.assertIn("poetry run python main.py 2>&1 | tee", src)
+        self.assertEqual(
+            re.findall(r"--mode\s+(\S+)", src), ["metaculus_cup"],
+            "production must use the default mode for the scored tournament",
+        )
 
 
 if __name__ == "__main__":
