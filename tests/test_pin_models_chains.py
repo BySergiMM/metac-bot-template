@@ -50,10 +50,11 @@ def load(**env):
     credential set silently exercises a different one.
 
     That is how the crash of 2026-09-10 reached production: _parser_primary
-    read os.environ when called, `test_one_credential` restored the env before
-    calling selftest(), the selftest passed in CI, and the identical
-    combination failed on the first scheduled run. Use `pinned_env` for
-    anything that must hold the environment across a CALL.
+    read os.environ when called, the selftest test for this combination (then
+    `test_one_credential`, now `test_the_production_pin_step_combination`)
+    restored the env before calling selftest(), the selftest passed in CI, and
+    the identical combination failed on the first scheduled run. Use
+    `pinned_env` for anything that must hold the environment across a CALL.
     """
     saved = {}
     managed = [
