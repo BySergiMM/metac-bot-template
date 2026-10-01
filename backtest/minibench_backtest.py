@@ -132,7 +132,8 @@ def do_fetch(a):
         print("NOTE: the API reports status=resolved and a resolution_set_time but leaves")
         print("question.resolution null, so nothing is scorable from the API alone. The web")
         print("UI does render the outcome, so an HTML fallback is the next thing to try.")
-        print("Every other field is complete and the dataset ships as an artifact.")
+        print("Every other field is complete. The dataset is not uploaded anywhere: it is")
+        print("Metaculus data, and their Terms of Use restrict redistributing it.")
     return 0 if rows else 1
 
 def brier(p, o): return (p - o) ** 2

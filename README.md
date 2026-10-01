@@ -19,7 +19,7 @@ If you run into trouble, reach out to `ben [at] metaculus [.com]`
 
 
 ## Quick start -> Fork and use Github Actions
-The easiest way to use this repo is to fork it, paste in two API keys, and click "Run workflow". After that, the bot will keep forecasting on new questions automatically every 20 minutes — no local setup needed.
+The easiest way to use this repo is to fork it, paste in two API keys, and click "Run workflow". After that, the bot will keep forecasting on new questions automatically — no local setup needed. (How often GitHub actually starts the scheduled run is measured in [docs/cadence.md](docs/cadence.md): a handful of times a day, not every few minutes.)
 
 1) **Fork the repository** — go to the [repository](https://github.com/Metaculus/metac-bot-template) and click **Fork** in the top right.
 2) **Add your two API keys as repository secrets** — in your fork, go to `Settings → Secrets and variables → Actions → New repository secret`. Add these two (names must match exactly, all caps):
@@ -27,7 +27,7 @@ The easiest way to use this repo is to fork it, paste in two API keys, and click
    - **`OPENROUTER_API_KEY`** — get free credits via [this form](https://forms.gle/aQdYMq9Pisrf1v7d8), or make your own key on [OpenRouter](https://openrouter.ai/). You can also use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`, `ASKNEWS_SECRET`, etc. — these all work out of the box if you set them.
 3) **Enable Actions** — click the `Actions` tab, then click `I understand my workflows, go ahead and enable them`.
 4) **Run the test workflow to confirm everything works** — go to `Actions → Test Bot → Run workflow → Run workflow` (green button). This forecasts on whatever's currently open in the [bot-testing-area tournament](https://www.metaculus.com/tournament/bot-testing-area/) so you can verify your setup posts forecasts to Metaculus end-to-end. Once the run finishes (~3–5 min), check your bot's profile on Metaculus to confirm the forecasts landed.
-5) **You're done!** The `Forecast on new AI tournament questions` workflow is already enabled and will run every 20 minutes, picking up any new tournament questions and skipping ones it has already forecast on.
+5) **You're done!** The `Forecast on new AI tournament questions` workflow is already enabled and runs on a schedule (its cron asks for every 5 minutes; GitHub delivers a handful of runs a day, see [docs/cadence.md](docs/cadence.md)), picking up any new tournament questions and skipping ones it has already forecast on.
 
 To pause your bot, go to `Actions → Forecast on new AI tournament questions → ... (top right) → Disable workflow`.
 
@@ -46,8 +46,8 @@ Instructions for getting your METACULUS_TOKEN, OPENROUTER_API_KEY, or optional s
 ## Changing the Github automation
 To run a different script under the same workflows, edit the `poetry run python main.py` line in the appropriate file under `.github/workflows/` and replace `main.py` with your script. The workflows that exist:
 - `test_bot.yaml` — manual-trigger smoke test against the bot-testing-area tournament.
-- `run_bot_on_tournament.yaml` — every 20 min on the live AIB tournament + MiniBench.
-- `run_bot_on_metaculus_cup.yaml` — every 2 days on the Metaculus Cup.
+- `run_bot_on_tournament.yaml` — scheduled, on the live AIB tournament + MiniBench: the cron asks for a run every 5 min, and GitHub delivered 4–9 a day through September 2026 ([docs/cadence.md](docs/cadence.md)).
+- `run_bot_on_metaculus_cup.yaml` — manual only, on the Metaculus Cup; its every-2-days cron was removed.
 
 **To run `main_with_no_framework.py` via GitHub Actions instead of `main.py`:** open the workflow file you want and change `poetry run python main.py` to `poetry run python main_with_no_framework.py`. That's the only change required.
 

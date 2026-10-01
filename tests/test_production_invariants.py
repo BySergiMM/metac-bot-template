@@ -11,7 +11,8 @@ Grouped by the promise, not by the module:
   Security      no secret, rationale, probability or provider body in a log
   Integrity     five predictions stay five; nothing partial is ever published
   Publication   one prediction, one comment, orphans named out loud
-  Concurrency   loop-safe semaphore, bounded research, isolated quota buckets
+  Concurrency   loop-safe semaphore, bounded research, atomic chain selection
+  Dead code     no statement that can never run, so nothing reads as live
   Discovery     every page read, no question processed twice
   Workflow      scored tournaments only from the one production workflow
   Deployment    the code CI generates still keeps all of the above
@@ -41,9 +42,9 @@ def yaml_without_comments(*parts: str) -> str:
     """Workflow text with `#` comment lines removed.
 
     Necessary because these workflows document what they deliberately do NOT
-    contain -- research_fallback_e2e.yaml literally says "No `schedule:` key
-    anywhere in this file, on purpose" -- so a plain substring search finds
-    the prose rather than the key.
+    contain -- ci.yaml literally says a future edit adding `env: secrets.*`
+    must be caught -- so a plain substring search finds the prose rather than
+    the key.
     """
     kept = []
     for line in read(*parts).splitlines():
@@ -96,23 +97,6 @@ class NoCredentialMaterialInProductionCode(unittest.TestCase):
                     shape.search(src),
                     "{0} contains credential-shaped text".format("/".join(parts)),
                 )
-
-    def test_the_generator_emits_env_var_names_not_values(self):
-        """_bucket_expr must interpolate the env var NAME. The behavioural
-        proof is GeneratedCodeInvariants; this pins the mechanism, because a
-        generator that switched to os.environ.get() there would bake a live
-        credential into a file."""
-        tree = parse("backtest", "pin_models.py")
-        node = find_function(tree, "_bucket_expr")
-        self.assertIsNotNone(node, "_bucket_expr is gone")
-        body = ast.unparse(node)
-        self.assertIn("env_var", body, "the env var NAME must be interpolated")
-        self.assertNotIn("os.environ", body)
-        self.assertNotIn("os.getenv", body)
-
-    def test_bucket_backend_reads_the_credential_at_runtime(self):
-        src = read("backtest", "balanced_llm.py")
-        self.assertIn("os.environ.get(api_key_env)", src)
 
 
 class NoForecastContentReachesLogs(unittest.TestCase):
@@ -277,22 +261,97 @@ class ConcurrencyInvariants(unittest.TestCase):
         self.assertIn("_max_concurrent_questions = (\n        1", read("main.py"))
 
     def test_load_order_contains_no_await_or_yield(self):
-        """R9: bucket selection must be atomic under asyncio. A suspension
+        """R9: chain selection must be atomic under asyncio. A suspension
         point between reading the loads and using them would let every
-        concurrent caller pick the same bucket."""
+        concurrent caller pick the same chain."""
         node = find_function(parse("backtest", "balanced_llm.py"), "_load_order")
         self.assertIsNotNone(node)
         for child in ast.walk(node):
             self.assertNotIsInstance(child, ast.Await)
             self.assertNotIsInstance(child, ast.Yield)
 
-    def test_every_gemini_bucket_has_an_explicit_quota(self):
-        """An unregistered bucket key resolves to a limiter with NO limit."""
-        from backtest.rate_limiter import DEFAULT_LIMITS, GEMINI_BUCKET_KEYS
 
-        for key in GEMINI_BUCKET_KEYS:
-            self.assertIn(key, DEFAULT_LIMITS)
-            self.assertEqual(DEFAULT_LIMITS[key].requests_per_minute, 15.0)
+# ===========================================================  DEAD CODE
+
+
+def unreachable_statements(tree: ast.AST) -> list:
+    """Line numbers of statements that follow a return, raise, continue or
+    break in the same block, and so can never run."""
+    terminal = (ast.Return, ast.Raise, ast.Continue, ast.Break)
+    hits = []
+
+    def walk_block(statements):
+        for position, statement in enumerate(statements):
+            if isinstance(statement, terminal) and position + 1 < len(statements):
+                hits.append(statements[position + 1].lineno)
+            for field in ("body", "orelse", "finalbody"):
+                inner = getattr(statement, field, None)
+                if isinstance(inner, list) and inner and isinstance(inner[0], ast.stmt):
+                    walk_block(inner)
+            for handler in getattr(statement, "handlers", None) or []:
+                walk_block(handler.body)
+            for case in getattr(statement, "cases", None) or []:
+                walk_block(case.body)
+
+    walk_block(getattr(tree, "body", []))
+    return sorted(hits)
+
+
+class NoUnreachableCode(unittest.TestCase):
+    """pin_models._parser_primary once ended `return configured` and then went
+    on to read GROQ_API_KEY and return a Groq model. Nothing after the first
+    return could run, but it read like live behaviour -- as if an environment
+    variable could reroute the parser to Groq -- and a reader had no way to
+    tell from the source that it could not."""
+
+    SKIP = {"__pycache__", "node_modules", "site-packages"}
+
+    def _sources(self):
+        for directory, subdirs, files in os.walk(ROOT):
+            subdirs[:] = sorted(
+                d for d in subdirs if not d.startswith(".") and d not in self.SKIP
+            )
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    yield os.path.join(directory, name)
+
+    def test_no_python_file_has_statements_after_a_return_or_raise(self):
+        checked = 0
+        for path in self._sources():
+            with io.open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), filename=path)
+            checked += 1
+            self.assertEqual(
+                unreachable_statements(tree), [],
+                "{0}: statements that can never run".format(
+                    os.path.relpath(path, ROOT)),
+            )
+        self.assertGreater(checked, 20, "the scan found almost no source files")
+
+    def test_the_scanner_finds_what_it_is_meant_to_find(self):
+        """Guards the guard, including the nested shapes."""
+        straight = "def f(x):\n    return x\n    y = 1\n"
+        nested = (
+            "def f(items):\n"
+            "    for item in items:\n"
+            "        if item:\n"
+            "            continue\n"
+            "            print(item)\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError:\n"
+            "        raise\n"
+            "        cleanup()\n"
+        )
+        clean = (
+            "def f(x):\n"
+            "    if x:\n"
+            "        return 1\n"
+            "    return 2\n"
+        )
+        self.assertEqual(unreachable_statements(ast.parse(straight)), [3])
+        self.assertEqual(unreachable_statements(ast.parse(nested)), [5, 10])
+        self.assertEqual(unreachable_statements(ast.parse(clean)), [])
 
 
 # ===========================================================  DISCOVERY
@@ -330,7 +389,6 @@ class WorkflowInvariants(unittest.TestCase):
     PRODUCTION = (".github", "workflows", "run_bot_on_tournament.yaml")
     CUP = (".github", "workflows", "run_bot_on_metaculus_cup.yaml")
     TEST_BOT = (".github", "workflows", "test_bot.yaml")
-    E2E = (".github", "workflows", "research_fallback_e2e.yaml")
 
     def test_production_runs_the_scored_tournament_mode(self):
         src = read(*self.PRODUCTION)
@@ -346,16 +404,14 @@ class WorkflowInvariants(unittest.TestCase):
         self.assertIn("concurrency:", src)
         self.assertIn("cancel-in-progress: false", src)
 
-    def test_the_unscored_workflows_target_only_the_practice_area(self):
-        for parts in (self.TEST_BOT, self.E2E):
-            src = read(*parts)
-            self.assertIn("--mode test_questions", src, "/".join(parts))
+    def test_the_unscored_workflow_targets_only_the_practice_area(self):
+        src = read(*self.TEST_BOT)
+        self.assertIn("--mode test_questions", src)
 
     def test_no_unscored_workflow_is_scheduled(self):
-        for parts in (self.TEST_BOT, self.E2E):
-            src = yaml_without_comments(*parts)
-            self.assertNotIn("schedule:", src, "/".join(parts))
-            self.assertNotIn("cron:", src, "/".join(parts))
+        src = yaml_without_comments(*self.TEST_BOT)
+        self.assertNotIn("schedule:", src)
+        self.assertNotIn("cron:", src)
 
     def test_exactly_one_workflow_publishes_to_a_scored_tournament(self):
         """The Cup workflow also publishes, so it must stay off the schedule
@@ -421,8 +477,9 @@ class WorkflowInvariants(unittest.TestCase):
         limits are per project, and the APIs ToS 2.d forbids attempting to
         circumvent them, but no Google source says whether one workload across
         several projects is circumvention. Unresolved, so production carries
-        one bucket. The code path and the secrets both remain; only the
-        production wiring is reduced. See the note in the workflow."""
+        one credential. The code that could spread calls over several has been
+        removed, so this keeps the workflow from suggesting otherwise. See the
+        note in the workflow."""
         src = yaml_without_comments(*self.PRODUCTION)
         self.assertIn("GEMINI_API_KEY:", src, "the fallback leg must stay")
         for extra in ("GEMINI2_API_KEY:", "GEMINI3_API_KEY:", "GEMINI4_API_KEY:"):
@@ -432,36 +489,32 @@ class WorkflowInvariants(unittest.TestCase):
                 "the quota-circumvention question is unresolved",
             )
 
-    def test_one_credential_generates_no_per_credential_bucket_wiring(self):
-        """The R11 mitigation must be a real reduction, not a cosmetic one.
+    def test_extra_gemini_credentials_generate_no_per_credential_wiring(self):
+        """The R11 reduction must be real, not cosmetic: a second Gemini
+        credential in the environment must not be wired into main.py.
 
-        Originally phrased as "emits no BalancedLlm". That proxy stopped
-        meaning what it was written to mean once the forecaster ensemble
-        started reusing BalancedLlm to spread the five forecast calls over
-        three DISTINCT MODELS -- a shape that needs one credential per
-        provider, which is exactly what production has. The property R11
-        actually promised is that no SECOND Gemini credential is wired up, so
-        that is what is asserted now: no bucket_backend call, no limiter_key,
-        and no GEMINI2/3/4 anywhere in the generated source.
+        The code that once did so (bucket_backend, limiter_key, one chain per
+        credential) is gone, so this asserts the absence in the output rather
+        than in a flag: no bucket_backend call, no limiter_key, and no
+        GEMINI2/3/4 anywhere in the generated source, even when those
+        variables ARE set.
         """
         import importlib
         import sys
 
-        saved = {
-            key: os.environ.get(key)
-            for key in ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
-                        "GEMINI4_API_KEY", "GROQ_API_KEY")
-        }
+        names = ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
+                 "GEMINI4_API_KEY", "GROQ_API_KEY")
+        saved = {key: os.environ.get(key) for key in names}
         for key in saved:
             os.environ.pop(key, None)
-        os.environ["GEMINI_API_KEY"] = "one"
-        os.environ["GROQ_API_KEY"] = "g"
+        os.environ.update(GEMINI_API_KEY="one", GEMINI2_API_KEY="two",
+                          GEMINI3_API_KEY="three", GEMINI4_API_KEY="four",
+                          GROQ_API_KEY="g")
         try:
             sys.modules.pop("backtest.pin_models", None)
             pin_models = importlib.import_module("backtest.pin_models")
-            self.assertFalse(pin_models.BALANCED)
             generated = pin_models.patch(read("main.py"), pin_models.DEFAULTS)
-            self.assertNotIn("bucket_backend(", generated)
+            self.assertNotIn("bucket_backend", generated)
             self.assertNotIn("limiter_key", generated)
             for extra in ("GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY"):
                 self.assertNotIn(extra, generated)
@@ -635,10 +688,6 @@ class WorkflowInvariants(unittest.TestCase):
             # file in a test command without ever running the bot.
             if "python main.py" not in text:
                 continue
-            # research_fallback_e2e runs main.py with OpenRouter deliberately
-            # absent; it is an experiment about a missing key, not production.
-            if name.startswith("research_"):
-                continue
             steps = text.split("- name:")
             pin = [b for b in steps if "pin_models.py" in b]
             run = [b for b in steps if "python main.py" in b]
@@ -688,6 +737,127 @@ class WorkflowInvariants(unittest.TestCase):
             for extra in ("GEMINI2_API_KEY:", "GEMINI3_API_KEY:", "GEMINI4_API_KEY:"):
                 self.assertNotIn(extra, src, name)
 
+    #: Workflow artifacts are world-readable, because this repository is
+    #: public. Metaculus' Terms of Use restrict redistributing its API data
+    #: (.gitignore, research/export_safe_report.py), and a dataset of question
+    #: titles, URLs, resolutions and community predictions is exactly that. So
+    #: what a workflow may upload is an ALLOWLIST, not "everything except the
+    #: dataset": adding an upload means adding it here, on purpose, in review.
+    #: A denylist fails open the day someone uploads a different file.
+    ALLOWED_ARTIFACT_UPLOADS = {
+        "research_track_record.yaml": {
+            "milestone2_summary.json",
+            "milestone2_report.txt",
+        },
+    }
+
+    @staticmethod
+    def _artifact_paths_in(workflow_text: str) -> set:
+        """Every `path:` entry of every actions/upload-artifact step in one
+        workflow's text (comments already removed). A step with no `path:` at
+        all is reported as "<none>", since an upload whose contents cannot be
+        read cannot be allowed."""
+        lines = workflow_text.splitlines()
+
+        def indent(text: str) -> int:
+            return len(text) - len(text.lstrip())
+
+        found = set()
+        for start, line in enumerate(lines):
+            if "actions/upload-artifact" not in line:
+                continue
+            # The step's own keys sit at the column of `uses:`, or two columns
+            # right of the dash when the step starts with `- uses:`.
+            key_indent = indent(line) + (2 if line.lstrip().startswith("- ") else 0)
+            paths = set()
+            index = start + 1
+            while index < len(lines):
+                text = lines[index]
+                if text.strip() and indent(text) < key_indent:
+                    break
+                match = re.match(r"\s*path:\s*(.*)$", text)
+                if match and indent(text) == key_indent + 2:
+                    value = match.group(1).strip()
+                    if value in ("|", "|-", ">", ">-"):
+                        index += 1
+                        while index < len(lines) and (
+                            not lines[index].strip()
+                            or indent(lines[index]) > indent(text)
+                        ):
+                            if lines[index].strip():
+                                paths.add(lines[index].strip())
+                            index += 1
+                        continue
+                    if value:
+                        paths.add(value.strip("\"'"))
+                index += 1
+            found |= paths or {"<none>"}
+        return found
+
+    def _uploaded_artifact_paths(self, name: str) -> set:
+        return self._artifact_paths_in(
+            yaml_without_comments(".github", "workflows", name))
+
+    def test_no_workflow_uploads_anything_outside_the_allowlist(self):
+        """backtest.yaml used to upload dataset.json -- Metaculus question
+        titles, URLs, resolutions and community predictions -- as a public
+        artifact, against the Terms-of-Use note in .gitignore."""
+        workflow_dir = os.path.join(ROOT, ".github", "workflows")
+        for name in sorted(os.listdir(workflow_dir)):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            uploaded = self._uploaded_artifact_paths(name)
+            allowed = self.ALLOWED_ARTIFACT_UPLOADS.get(name, set())
+            self.assertLessEqual(
+                uploaded, allowed,
+                "{0} uploads {1}, which is not on the allowlist; workflow "
+                "artifacts of a public repository are world-readable".format(
+                    name, sorted(uploaded - allowed)),
+            )
+
+    def test_the_artifact_allowlist_is_not_vacuous(self):
+        """Guards the guard: the one permitted upload must still be found by
+        the same parser, or an unreadable step layout would pass silently."""
+        for name, allowed in self.ALLOWED_ARTIFACT_UPLOADS.items():
+            self.assertEqual(self._uploaded_artifact_paths(name), allowed, name)
+
+    def test_the_artifact_parser_reads_inline_and_block_paths(self):
+        """The two YAML spellings of `path:` must both be seen, a `path:` that
+        belongs to some other step must not be, and a step with no path must
+        not be mistaken for a harmless one."""
+        inline = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - name: Upload\n"
+            "        uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: x\n"
+            "          path: dataset.json\n"
+            "      - name: Next\n"
+            "        run: echo\n"
+            "        env:\n"
+            "          path: not-an-upload\n"
+        )
+        block = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: x\n"
+            "          path: |\n"
+            "            one.json\n"
+            "            two.txt\n"
+        )
+        nopath = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: x\n"
+        )
+        self.assertEqual(self._artifact_paths_in(inline), {"dataset.json"})
+        self.assertEqual(self._artifact_paths_in(block), {"one.json", "two.txt"})
+        self.assertEqual(self._artifact_paths_in(nopath), {"<none>"})
+        self.assertEqual(self._artifact_paths_in("jobs:\n  a:\n    steps: []\n"),
+                         set())
+
     def test_no_workflow_grants_write_permissions_to_the_bot(self):
         for name in sorted(os.listdir(os.path.join(ROOT, ".github", "workflows"))):
             if not name.endswith((".yaml", ".yml")):
@@ -735,7 +905,7 @@ class GeneratedCodeInvariants(unittest.TestCase):
         ast.parse(self._generate(GEMINI_API_KEY="a", GROQ_API_KEY="g"))
 
     def test_generation_is_deterministic(self):
-        env = dict(GEMINI_API_KEY="a", GEMINI2_API_KEY="b", GROQ_API_KEY="g")
+        env = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
         self.assertEqual(self._generate(**env), self._generate(**env))
 
     def test_generation_is_idempotent(self):
@@ -756,16 +926,12 @@ class GeneratedCodeInvariants(unittest.TestCase):
                     os.environ[key] = value
             sys.modules.pop("backtest.pin_models", None)
 
-    def test_generated_code_names_every_bucket_and_no_secret_value(self):
+    def test_generated_code_contains_no_secret_value(self):
         generated = self._generate(
-            GEMINI_API_KEY="secret-one", GEMINI2_API_KEY="secret-two",
-            GEMINI3_API_KEY="secret-three", GEMINI4_API_KEY="secret-four",
-            GROQ_API_KEY="secret-groq",
+            OPENROUTER_API_KEY="secret-openrouter", GEMINI_API_KEY="secret-one",
+            GEMINI2_API_KEY="secret-two", GROQ_API_KEY="secret-groq",
         )
-        for env_var in ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
-                        "GEMINI4_API_KEY"):
-            self.assertIn('"{0}"'.format(env_var), generated)
-        for value in ("secret-one", "secret-two", "secret-three", "secret-four",
+        for value in ("secret-openrouter", "secret-one", "secret-two",
                       "secret-groq"):
             self.assertNotIn(value, generated,
                              "a credential VALUE was written into main.py")
@@ -831,7 +997,7 @@ class GeneratedCodeInvariants(unittest.TestCase):
         # legitimate difference.
         cleaned = strip_llms(generated)
         for import_line in ("from backtest.fallback_llm import FallbackLlm\n",
-                            "from backtest.balanced_llm import BalancedLlm, bucket_backend\n"):
+                            "from backtest.balanced_llm import BalancedLlm\n"):
             cleaned = cleaned.replace(import_line, "")
         self.assertEqual(cleaned, strip_llms(original))
 

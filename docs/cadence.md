@@ -173,6 +173,47 @@ The cost of a scheduled workflow is not the cost of one run. It is one run
 times how often the platform will start another, and a concurrency group that
 queues rather than drops turns "occasionally" into "always".
 
+## Re-measurement, 2026-10-01: about six runs a day
+
+How often GitHub actually started `run_bot_on_tournament.yaml`, over its whole
+history: 568 runs, 2026-08-17T09:06Z .. 2026-10-01T02:10Z (566 by `schedule`,
+2 by `workflow_dispatch`).
+
+Method. Read from the Actions API on 2026-10-01T07:20Z, every page until the
+last (`total_count` 568; 568 runs read, no duplicate ids):
+
+```
+GET /repos/BySergiMM/metac-bot-template/actions/workflows/run_bot_on_tournament.yaml/runs?per_page=100&page=1..6
+```
+
+A day is a UTC calendar day of the run's `created_at`. A gap is the time between
+the `created_at` of consecutive runs. Percentiles are linear interpolations. The
+cron requests 12 events an hour, 288 a day. The same computation over 18-23 Aug
+gives 39.3 runs a day and a median gap of 32.2 min, which is the baseline at the
+top of this document, so it is the same measure.
+
+| window | runs per day, mean (min–max) | delivered of 288 | gap median | gap p90 | gap max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1–30 Sep (30 days) | 6.6 (4–9) | 2.3% | 208.5 min | 323.1 min | 471.2 min |
+| 17–30 Sep (the last 14 full days) | 6.0 (4–8) | 2.1% | 240.6 min | 341.5 min | 471.2 min |
+| 24–30 Sep (7 days) | 5.4 (4–6) | 1.9% | 291.3 min | 360.4 min | 471.2 min |
+
+Runs per day, 17 to 30 Sep: 6, 7, 8, 7, 5, 7, 6, 6, 6, 6, 6, 4, 5, 5 (84 runs).
+
+So the scheduled job starts about six times a day, and four or five over the
+last days: not every 5 minutes as the cron asks (about 2% of the 288 events a
+day are delivered), and not every 20 minutes as the README inherited from the
+upstream template said. A run is short, median 6.2 min over 1–30 Sep
+(`updated_at - run_started_at`, an approximation), which is consistent with the
+early exit after two empty polls.
+
+What that means for coverage is arithmetic on numbers already in this
+document, not a new measurement: the median gap between delivered runs over the
+last 14 days is about 4 hours, longer than the 1.5–3 h MiniBench forecast
+windows quoted below, so a question that opens just after a run can close
+before the next one starts. A green run says the job was delivered, not that the
+tournaments are being watched continuously.
+
 ## What would actually give ~5-minute detection
 
 Cron alone cannot, because delivery is upstream. Three options:
@@ -188,10 +229,12 @@ Cron alone cannot, because delivery is upstream. Three options:
 Coverage, not compliance. Nothing here risks disqualification.
 
 MiniBench forecast windows have been measured at 1.5–3 h wide (418/418
-questions, none shorter). Against a 32-minute median gap the bot has ample
-margin on a typical question. The exposure is the tail: a p90 gap of 55.7 min
-and a worst observed gap of 109.3 min can consume most of, or exceed, a
-90-minute window.
+questions, none shorter). Against the 32-minute median gap of 18–23 Aug the bot
+had ample margin on a typical question, and the exposure was the tail: a p90
+gap of 55.7 min and a worst observed gap of 109.3 min could consume most of, or
+exceed, a 90-minute window. Against the median gap of about 4 hours measured on
+2026-10-01 (above) that margin is gone: the median gap is longer than the
+windows, so a question can open and close between two delivered runs.
 
 Missed questions are a scoring loss on those questions, not a rules breach —
 Metaculus requires a comment on each question the bot *forecasts*, not that it

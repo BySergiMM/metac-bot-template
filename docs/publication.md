@@ -144,9 +144,9 @@ holding the Metaculus token.
 
 ## Tests
 
-`tests/test_publication.py` — 27 cases driving the real client with only the
-two network methods replaced: happy path, prediction failure, prediction
-timeout, comment failure, comment timeout, comment retry succeeding, comment
-retries permanently failing, orphan marker content, duplicate suppression on
-both paths, group posts with 1/2/N/concurrent subquestions, rerun after
-partial publication, and process restart.
+`tests/test_publication.py` drives the real client with only the two network
+methods replaced: happy path, prediction failure, prediction timeout, comment
+failure, comment timeout, comment retry succeeding, comment retries
+permanently failing, orphan marker content, duplicate suppression on both
+paths, group posts with 1/2/N/concurrent subquestions, rerun after partial
+publication, and process restart.

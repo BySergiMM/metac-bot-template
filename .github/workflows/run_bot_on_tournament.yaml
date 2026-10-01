@@ -31,10 +31,15 @@ on:
     # also asks for. The list below keeps the same 12 requests per hour and
     # the same 5-minute spacing, offset by two minutes off that grid.
     #
-    # HONEST STATUS: this is an UNVERIFIED mitigation. The baseline above is
-    # recorded so the change is falsifiable -- re-measure after a few days
-    # and revert if the distribution has not moved. Reliable 5-minute
-    # detection is NOT achievable through cron alone; see docs/cadence.md.
+    # STATUS: the phase shift did NOT work. docs/cadence.md re-measured it on
+    # 2026-09-07 (median gap 174.6 min) and again on 2026-10-01 over all 568
+    # runs: 4 to 9 runs a day through September, 6.0 a day on average over
+    # the last 14 full days (17-30 Sep), median gap 240.6 min -- about 2% of
+    # the 288 events a day requested. The cron is kept because nothing above
+    # `*/5` exists to ask for, and reverting the phase would be one more
+    # unverified guess. Reliable 5-minute detection is NOT achievable through
+    # cron alone; what one delivered run buys is the poll loop in "Run bot"
+    # below. See docs/cadence.md.
     - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
 
 # Least privilege: this job checks out the repo and calls external APIs. It
@@ -87,13 +92,11 @@ jobs:
         env:
           # R11 -- ONE Gemini credential, deliberately.
           #
-          # GEMINI2/3/4_API_KEY are still configured as repository secrets and
-          # the four-bucket code path is still present and tested. They are NOT
-          # passed to production, which is what decides how many buckets exist:
-          # pin_models reads os.environ at patch time and
-          # `BALANCED = len(ACTIVE_GEMINI_BUCKETS) > 1`, so one credential
-          # generates exactly the single-chain block that existed before
-          # buckets, with no BalancedLlm wrapper.
+          # The code that turned extra Gemini credentials into extra chains
+          # (added in d6e60ca: bucket_backend, limiter_key, one chain per
+          # credential) has been removed, so nothing reads GEMINI2/3/4_API_KEY
+          # any more. They are NOT passed to production, and any repository
+          # secrets of those names can be deleted.
           #
           # Why: four credentials from four Google projects, driven by one
           # application, obtain 4 x 15 = 60 RPM where one project allows 15.
@@ -110,17 +113,18 @@ jobs:
           # quota-circumvention finding restricts the projects, and it would do
           # so mid-tournament.
           #
-          # The cost of one bucket is throughput in a DEGRADED mode only.
+          # The cost of one credential is throughput in a DEGRADED mode only.
           # Gemini is the second link of OpenRouter -> Gemini -> Groq and is
-          # reached only when OpenRouter actually fails. A saturated bucket
-          # makes the limiter WAIT, not fail, and past the 300s ceiling it
+          # reached only when OpenRouter actually fails. A saturated limiter
+          # makes the call WAIT, not fail, and past the 300s ceiling it
           # raises RateLimitTimeout, which fails over to Groq. Prediction
           # counts, aggregation and the success threshold are untouched either
           # way.
           #
-          # To re-enable after establishing compliance: add the three env vars
-          # back to BOTH this step and the pin step above, and delete the
-          # assertion in tests/test_production_invariants.py.
+          # To re-enable after establishing compliance: restore the removed
+          # code from git history (`git log -S bucket_backend`), add the three
+          # env vars back to BOTH the pin step and the Run bot step, and
+          # delete the assertion in tests/test_production_invariants.py.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # Gates the chain at PATCH time. pin_models reads os.environ here to
@@ -289,7 +293,8 @@ jobs:
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           # Fallback providers. Both verified by research/smoke_test_providers.py
           # before being wired in; absent keys simply disable their leg.
-          # See the R11 note on the pin step above: one bucket, on purpose.
+          # See the R11 note on the pin step above: one Gemini credential,
+          # on purpose.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # WhatsApp status notifications (notifications/ + scripts/notify.py).
