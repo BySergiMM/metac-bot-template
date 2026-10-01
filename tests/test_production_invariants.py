@@ -391,10 +391,80 @@ class WorkflowInvariants(unittest.TestCase):
     TEST_BOT = (".github", "workflows", "test_bot.yaml")
 
     def test_production_runs_the_scored_tournament_mode(self):
+        """The poll loop runs the default mode (FutureEval + MiniBench). The
+        Cup has its own step after it; see the Cup tests below."""
         src = read(*self.PRODUCTION)
         self.assertIn("python main.py", src)
         self.assertNotIn("--mode test_questions", src)
-        self.assertNotIn("--mode metaculus_cup", src)
+        self.assertIn("poetry run python main.py 2>&1 | tee", src)
+
+    # ------------------------------------------------- the Cup, in production
+
+    CUP_STEP = "Forecast new Metaculus Cup questions (practice)"
+
+    def _production(self) -> dict:
+        import yaml
+
+        return yaml.safe_load(read(*self.PRODUCTION))
+
+    def _production_steps(self) -> dict:
+        return {
+            step["name"]: (index, step)
+            for index, step in enumerate(self._production()["jobs"]["forecast_job"]["steps"])
+            if "name" in step
+        }
+
+    def test_the_cup_runs_after_the_pin_step_and_the_poll_window(self):
+        """After the pin step, or the Cup gets the SDK's default models (one of
+        which OpenRouter no longer serves). After the window, or its early
+        exit never fires: the Cup almost always has open questions."""
+        steps = self._production_steps()
+        cup_index, cup = steps[self.CUP_STEP]
+        self.assertLess(steps["Pin LLM models"][0], cup_index)
+        self.assertLess(steps["Run bot"][0], cup_index)
+        self.assertEqual(cup["run"].strip(), "poetry run python main.py --mode metaculus_cup")
+        self.assertIn("timeout-minutes", cup)
+
+    def test_the_cup_step_gets_the_same_credentials_as_run_bot(self):
+        """A key missing from one step shortens that step's fallback chain
+        with no error. The Cup drops only the poll settings and WhatsApp."""
+        steps = self._production_steps()
+        run_env = set(steps["Run bot"][1]["env"])
+        cup_env = set(steps[self.CUP_STEP][1]["env"])
+        expected = {
+            name for name in run_env
+            if not name.startswith(("POLL_", "CALLMEBOT_"))
+        }
+        self.assertEqual(cup_env, expected)
+        self.assertNotIn("GEMINI2_API_KEY", cup_env)
+
+    def test_cup_mode_never_reforecasts(self):
+        """Production runs the Cup ~6 times a day; re-forecasting every open
+        question each time would multiply spend on an unpaid tournament. The
+        practice-area mode is the one that may still re-forecast."""
+        src = read("main.py")
+        start = src.index('elif run_mode == "metaculus_cup":')
+        end = src.index('elif run_mode == "test_questions":')
+        cup_branch = "\n".join(
+            line for line in src[start:end].splitlines()
+            if not line.strip().startswith("#")
+        )
+        self.assertNotIn("skip_previously_forecasted_questions", cup_branch)
+        self.assertIn(
+            "skip_previously_forecasted_questions=True", src,
+            "the constructor default the Cup relies on",
+        )
+
+    def test_the_manual_cup_workflow_shares_the_production_concurrency_group(self):
+        """Two processes deciding "not forecast yet" at the same moment would
+        both forecast the same Cup question."""
+        import yaml
+
+        production = self._production()
+        self.assertEqual(production["concurrency"]["group"], "${{ github.workflow }}")
+        cup = yaml.safe_load(read(*self.CUP))
+        self.assertEqual(cup["concurrency"]["group"], production["name"])
+        self.assertFalse(cup["concurrency"]["cancel-in-progress"])
 
     def test_production_is_least_privilege(self):
         self.assertIn("permissions:\n  contents: read", read(*self.PRODUCTION))
@@ -434,8 +504,9 @@ class WorkflowInvariants(unittest.TestCase):
         )
 
     def test_the_cup_workflow_is_manual_only(self):
-        """It publishes to a scored tournament under the same token, in a
-        different concurrency group, without the model-pinning step."""
+        """It publishes under the same token as production, which already
+        forecasts the Cup on its schedule; a second schedule would be a second
+        unattended publisher."""
         src = yaml_without_comments(*self.CUP)
         self.assertIn("--mode metaculus_cup", src)
         self.assertNotIn("schedule:", src)

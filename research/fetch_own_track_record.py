@@ -75,8 +75,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DATASET_ROOT = os.path.join(REPO_ROOT, "research", "datasets")
 DATASET_KIND = "track-record"
 
-# Tournaments whose question universe defines production coverage.
-DEFAULT_UNIVERSE_TOURNAMENTS = ["33022", "minibench"]
+# Tournaments whose question universe defines production coverage: every
+# FutureEval season the bot has been pointed at, plus MiniBench. The live
+# season is pinned in tournaments.py; a test keeps it in this list.
+DEFAULT_UNIVERSE_TOURNAMENTS = ["33022", "33121", "minibench"]
 
 # Closed statuses only. "open" is added solely by --include-open.
 CLOSED_STATUSES = ["resolved", "closed"]

@@ -1,26 +1,20 @@
 name: Forecast on Metaculus Cup
 
-# MANUAL ONLY. The cron that used to live here (`0 0 */2 * *`) made this a
-# SECOND scheduled publisher to a scored tournament, running under the same
-# METACULUS_TOKEN as the tournament workflow and in a different concurrency
-# group, so the two could publish simultaneously.
+# MANUAL ONLY, and since 2026-10-01 no longer the only way the Cup gets
+# forecast: run_bot_on_tournament.yaml runs `--mode metaculus_cup` as its own
+# step after every poll window. This workflow is the "catch up now" button.
 #
-# It has never actually fired -- GitHub disables scheduled workflows in a fork
-# until they are enabled by hand, and `gh workflow list` reports this one as
-# `disabled_fork` with zero runs ever. That is an accident of the fork, not a
-# control: enabling it in the UI would have started an unattended publisher.
-#
-# Two further reasons it must not run unattended:
-#   * It does not run `backtest/pin_models.py`, so it would use whatever models
-#     forecasting-tools picks by default -- currently a researcher model
-#     OpenRouter no longer serves, which 404s every question.
-#   * It sets skip_previously_forecasted_questions = False (main.py), so every
-#     run re-forecasts every open Cup question.
-#
-# Removing the schedule makes the repository state match the intended
-# operational state instead of relying on a GitHub default.
+# History, kept because it is why this file has no schedule: the cron that
+# used to live here (`0 0 */2 * *`) made this a SECOND scheduled publisher
+# under the same METACULUS_TOKEN, in a different concurrency group, so the two
+# could publish simultaneously. It never fired only because GitHub disables
+# scheduled workflows in a fork until enabled by hand (`disabled_fork`).
 # tests/test_production_invariants.py asserts exactly one scheduled workflow
 # can publish to a scored tournament.
+#
+# What changed since: this workflow now runs the pin step, and main.py keeps
+# skip_previously_forecasted_questions=True in Cup mode, so a manual run
+# forecasts only Cup questions the bot has not forecast yet.
 on:
   workflow_dispatch:
 
@@ -30,9 +24,12 @@ on:
 permissions:
   contents: read
 
-# Add concurrency group to prevent parallel runs
+# The PRODUCTION workflow's group, not this workflow's own: production also
+# forecasts the Cup now, and two processes skipping "previously forecasted"
+# questions at the same moment would both see the same question as new.
+# Must stay identical to run_bot_on_tournament.yaml's `name:`.
 concurrency:
-  group: ${{ github.workflow }}
+  group: Forecast on new AI tournament questions
   cancel-in-progress: false
 
 
