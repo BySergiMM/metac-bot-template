@@ -31,10 +31,15 @@ on:
     # also asks for. The list below keeps the same 12 requests per hour and
     # the same 5-minute spacing, offset by two minutes off that grid.
     #
-    # HONEST STATUS: this is an UNVERIFIED mitigation. The baseline above is
-    # recorded so the change is falsifiable -- re-measure after a few days
-    # and revert if the distribution has not moved. Reliable 5-minute
-    # detection is NOT achievable through cron alone; see docs/cadence.md.
+    # STATUS: the phase shift did NOT work. docs/cadence.md re-measured it on
+    # 2026-09-07 (median gap 174.6 min) and again on 2026-10-01 over all 568
+    # runs: 4 to 9 runs a day through September, 6.0 a day on average over
+    # the last 14 full days (17-30 Sep), median gap 240.6 min -- about 2% of
+    # the 288 events a day requested. The cron is kept because nothing above
+    # `*/5` exists to ask for, and reverting the phase would be one more
+    # unverified guess. Reliable 5-minute detection is NOT achievable through
+    # cron alone; what one delivered run buys is the poll loop in "Run bot"
+    # below. See docs/cadence.md.
     - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
 
 # Least privilege: this job checks out the repo and calls external APIs. It
