@@ -116,7 +116,19 @@ DEFAULT_LIMITS: dict[str, ProviderLimits] = {
     # limits_for() hands an UNKNOWN key an unthrottled limiter too -- and an
     # unregistered key looks controlled while enforcing nothing.
     "openrouter/anthropic/claude-opus-4.6": ProviderLimits(),
+    # The forecaster since 2026-10-02. Opus 4.6 stays registered above so a
+    # models.txt override back to it keeps a registered bucket key.
+    "openrouter/anthropic/claude-opus-5.5": ProviderLimits(),
     "openrouter/anthropic/claude-haiku-4.5": ProviderLimits(),
+    # The researcher's first link when an AskNews credential is present (see
+    # pin_models.ACTIVE_ASKNEWS). Not an LLM: forecasting_tools' GeneralLlm
+    # routes this model string to AskNewsSearcher, which paces its own two
+    # news calls with a 12s sleep for AskNews' free tier, and main.py runs
+    # research one question at a time. Registered unthrottled for the same
+    # reason as the OpenRouter entries: an unknown key looks controlled and
+    # enforces nothing, and the registry is pinned against
+    # pin_models.RATE_LIMITED_MODELS.
+    "asknews/news-summaries": ProviderLimits(),
 }
 
 _ENV_PREFIX = "LLM_RATE_"

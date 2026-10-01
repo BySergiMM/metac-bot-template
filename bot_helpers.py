@@ -58,6 +58,53 @@ def silence_noisy_dependencies() -> None:
     litellm_logger.propagate = False
 
 
+# Prices litellm may not know, per million tokens, as (input, output) in USD.
+# Read from OpenRouter's /models API on 2026-10-02; keep in step with the
+# comment above backtest.pin_models.DEFAULTS.
+#
+# Why this exists: litellm loads its cost map by downloading it at import
+# time and falls back to the copy bundled in the wheel only when that
+# download fails. The locked wheel (1.80.10) predates claude-opus-5.5, so on
+# a run whose download failed the forecaster's calls are priced at $0 and the
+# per-question cost in the logs is silently wrong. The call itself does not
+# break: forecasting_tools' ModelTracker only warns, and litellm swallows the
+# cost-calculation error inside its logging callback. Measured by reading the
+# installed code, not assumed (general_llm.py, model_tracker.py,
+# litellm_logging.py::_response_cost_calculator).
+KNOWN_MODEL_PRICES_PER_MTOK = {
+    "openrouter/anthropic/claude-opus-5.5": (4.0, 20.0),
+}
+
+
+def register_model_prices() -> list[str]:
+    """Teach litellm the prices in KNOWN_MODEL_PRICES_PER_MTOK it is missing.
+
+    Fills gaps only. A model litellm already prices is left alone, so a newer
+    downloaded map always wins over this table and a price change upstream is
+    never masked by it. Returns the model ids registered, for the log line.
+    Must run before any GeneralLlm is built: ModelTracker decides whether to
+    warn in GeneralLlm.__init__.
+    """
+    import litellm
+
+    registered = []
+    for model, (input_per_mtok, output_per_mtok) in KNOWN_MODEL_PRICES_PER_MTOK.items():
+        if model in litellm.model_cost:
+            continue
+        litellm.register_model(
+            {
+                model: {
+                    "input_cost_per_token": input_per_mtok / 1_000_000,
+                    "output_cost_per_token": output_per_mtok / 1_000_000,
+                    "litellm_provider": model.split("/", 1)[0],
+                    "mode": "chat",
+                }
+            }
+        )
+        registered.append(model)
+    return registered
+
+
 # Log records whose CONTENT is a forecast on a live tournament question.
 # Everything else -- discovery counts, provider/bucket lines, rate-limit waits,
 # "Posted prediction/comment" -- carries no forecast content and is left alone,
