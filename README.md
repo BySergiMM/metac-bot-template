@@ -1,222 +1,109 @@
-# Simple Metaculus forecasting bot
-This repository contains a simple bot meant to get you started with creating your own bot for the AI Forecasting Tournament. Go to https://www.metaculus.com/futureeval/participate/ for more info and tournament rules (and then go to the  "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#want-to-join-the-ai-forecasting-benchmark) page).
+# Metaculus forecasting agent
 
-**Brand new to this?** You can get a working bot running in about 5 minutes without writing a single line of code — just fork this repo, paste two API keys into GitHub, and click "Run workflow". See **[Quick start](#quick-start--fork-and-use-github-actions)** below.
+An LLM agent that forecasts real questions on [Metaculus](https://www.metaculus.com/) without anyone watching it. It runs on GitHub Actions several times a day, finds new questions in the AI forecasting tournaments, researches them, asks several models for a forecast, combines the answers and publishes the result with a private comment explaining its reasoning.
 
-In this project are 2 files:
-- **main.py**: Our recommended template option that uses the [forecasting-tools](https://github.com/Metaculus/forecasting-tools) package to handle a lot of stuff in the background for you (such as API calls). We will update the package, thus allowing you to gain new features with minimal changes to your code.
-- **main_with_no_framework.py**: A copy of main.py but implemented with minimal dependencies. Useful if you want a more custom approach.
+It started from the official [Metaculus bot template](https://github.com/Metaculus/metac-bot-template). The template gets a bot to forecast once. Almost everything in this repository exists because running it unattended for weeks broke in ways the template does not handle: providers going down, questions that never got seen, forecasts leaking into public logs, a run that posts twice. The original template instructions are kept in [docs/template-guide.md](docs/template-guide.md).
 
+## Where it competes
 
-Join the conversation about bot creation, get support, and follow updates on the [Metaculus Discord](https://discord.com/invite/NJgCC2nDfh) 'build a forecasting bot' channel.
+| Tournament | Id | Prizes for bots | Runs |
+|---|---|---|---|
+| [Fall 2026 FutureEval](https://www.metaculus.com/tournament/fall-futureeval-2026/) | 33121 | Yes, $50k season | Every scheduled run |
+| MiniBench (rotates every two weeks) | `minibench` | Yes, $1k per round | Every scheduled run |
+| [Metaculus Cup Fall 2026](https://www.metaculus.com/tournament/metaculus-cup-fall-2026/) | 33108 | No, practice against human forecasters | After each run, new questions only |
 
-## 30min Video Tutorial
-This tutorial shows you how to set up our template bot so you can start forecasting in the tournament.
+The ids live in one file, [`tournaments.py`](tournaments.py). CI fails on the day a pinned season ends, so the bot can't keep polling a finished tournament without anyone noticing. That happened once, for three days.
 
-[![Watch the tutorial](https://cdn.loom.com/sessions/thumbnails/fc3c1a643b984a15b510647d8f760685-42b452e1ab7d2afa-full-play.gif)](https://www.loom.com/share/fc3c1a643b984a15b510647d8f760685?sid=29b502e0-cf64-421e-82c0-3a78451159ed)
+## Results so far
 
-If you run into trouble, reach out to `ben [at] metaculus [.com]`
+Summer 2026 FutureEval was its first season. Prizes have not been announced yet, so these figures are provisional (read on 2 October 2026):
 
+| | |
+|---|---|
+| Final position | **88th of 192 bots** |
+| Total score | +5.3 (the winner scored 5,815) |
+| Predictions published | 229, with 100 comments |
 
-## Quick start -> Fork and use Github Actions
-The easiest way to use this repo is to fork it, paste in two API keys, and click "Run workflow". After that, the bot will keep forecasting on new questions automatically — no local setup needed. (How often GitHub actually starts the scheduled run is measured in [docs/cadence.md](docs/cadence.md): a handful of times a day, not every few minutes.)
+The score is positive but small, and the reason is coverage rather than accuracy. The tournament score is a sum over questions, and a question the bot never sees counts as zero. On 18 August the bot had forecast 1 of 333 questions. Most of the work since then went into seeing more of them: paginated discovery, a polling loop inside each run, and measuring how often GitHub really delivers a scheduled run (about six times a day, not every five minutes; see [docs/cadence.md](docs/cadence.md)).
 
-1) **Fork the repository** — go to the [repository](https://github.com/Metaculus/metac-bot-template) and click **Fork** in the top right.
-2) **Add your two API keys as repository secrets** — in your fork, go to `Settings → Secrets and variables → Actions → New repository secret`. Add these two (names must match exactly, all caps):
-   - **`METACULUS_TOKEN`** — create one at https://www.metaculus.com/futureeval/participate/ (see the [resources page](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#creating-your-bot-account-and-metaculus-token) if you get stuck).
-   - **`OPENROUTER_API_KEY`** — get free credits via [this form](https://forms.gle/aQdYMq9Pisrf1v7d8), or make your own key on [OpenRouter](https://openrouter.ai/). You can also use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`, `ASKNEWS_SECRET`, etc. — these all work out of the box if you set them.
-3) **Enable Actions** — click the `Actions` tab, then click `I understand my workflows, go ahead and enable them`.
-4) **Run the test workflow to confirm everything works** — go to `Actions → Test Bot → Run workflow → Run workflow` (green button). This forecasts on whatever's currently open in the [bot-testing-area tournament](https://www.metaculus.com/tournament/bot-testing-area/) so you can verify your setup posts forecasts to Metaculus end-to-end. Once the run finishes (~3–5 min), check your bot's profile on Metaculus to confirm the forecasts landed.
-5) **You're done!** The `Forecast on new AI tournament questions` workflow is already enabled and runs on a schedule (its cron asks for every 5 minutes; GitHub delivers a handful of runs a day, see [docs/cadence.md](docs/cadence.md)), picking up any new tournament questions and skipping ones it has already forecast on.
+Brier and log scores on resolved questions are not published here yet. The [evaluation lab](docs/track-record.md) computes them, and they will go in this table once enough questions resolve to say something.
 
-To pause your bot, go to `Actions → Forecast on new AI tournament questions → ... (top right) → Disable workflow`.
+## How a question flows through it
 
-### Testing your changes against the GitHub Actions workflow
-You can run any workflow against any branch — no need to merge to `main` first, and no need to fork if you have push access to this repo.
-
-1. Push your branch to GitHub: `git push origin <your-branch>`.
-2. In the repo's Actions tab, pick the workflow you want to run (e.g. `Test Bot`) and click **Run workflow** (top right).
-3. Use the **"Use workflow from"** dropdown to select your branch instead of `main`, then click the green **Run workflow** button.
-
-The runner checks out your branch and uses the repo's existing secrets — those are scoped to the repo, not the branch, so they work for any branch in the same repo. This works for all three workflows.
-
-## API Keys
-Instructions for getting your METACULUS_TOKEN, OPENROUTER_API_KEY, or optional search provider API keys (AskNews, Exa, Perplexity, etc) are listed on the "Getting Started" section of the [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#want-to-join-the-ai-forecasting-benchmark) page.
-
-## Changing the Github automation
-To run a different script under the same workflows, edit the `poetry run python main.py` line in the appropriate file under `.github/workflows/` and replace `main.py` with your script. The workflows that exist:
-- `test_bot.yaml` — manual-trigger smoke test against the bot-testing-area tournament.
-- `run_bot_on_tournament.yaml` — scheduled, on the live FutureEval season + MiniBench (ids pinned in [`tournaments.py`](tournaments.py)): the cron asks for a run every 5 min, and GitHub delivered 4–9 a day through September 2026 ([docs/cadence.md](docs/cadence.md)). After each poll window it forecasts any Metaculus Cup question it has not forecast yet (practice: the Cup ranks bots but pays none).
-- `run_bot_on_metaculus_cup.yaml` — manual only, the same Cup step on demand; its every-2-days cron was removed.
-
-**To run `main_with_no_framework.py` via GitHub Actions instead of `main.py`:** open the workflow file you want and change `poetry run python main.py` to `poetry run python main_with_no_framework.py`. That's the only change required.
-
-## Editing in GitHub UI
-Remember that you can edit a bot non locally by clicking on a file in Github, and then clicking the 'Edit this file' button. Whether you develop locally or not, when making edits, attempt to do things that you think others have not tried, as this will help further innovation in the field more than doing something that has already been done. Feel free to ask about what has or has not been tried in the Discord, see [other bot's self-descriptions](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#what-are-other-bots-doing), or read bot's [open source code](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#open-source-bots).
-
-## Run/Edit the bot locally
-Local development is optional — most new users can run the bot entirely from GitHub Actions (see [Quick start](#quick-start--fork-and-use-github-actions)). Set up locally only if you want faster iteration on your prompts/code.
-
-### 1. Clone the repository
-```bash
-git clone https://github.com/Metaculus/metac-bot-template.git
-cd metac-bot-template
-```
-If you've already forked the repo, replace the URL with your fork's URL (copy it from your fork's page in the browser).
-
-### 2. Install Python 3.11+ and Poetry
-You need:
-- **Python 3.11 or newer** — get it from [python.org](https://www.python.org/downloads/) (or your OS package manager / `pyenv` / whatever you prefer).
-- **Poetry** — see Poetry's [install docs](https://python-poetry.org/docs/#installation). The `pipx install poetry` route works on macOS, Linux, and Windows.
-
-Confirm both are on your `PATH`:
-```bash
-python --version    # 3.11.x or higher
-poetry --version
+```mermaid
+flowchart LR
+    A[Scheduled run] --> B[Discover open questions<br/>every page, deduplicated]
+    B --> C{Already forecast?}
+    C -- yes --> Z[Skip]
+    C -- no --> D[Research<br/>one pass]
+    D --> E[Five forecasts<br/>spread across models]
+    E --> F[Parser<br/>structured output]
+    F --> G[Median]
+    G --> H[Publish forecast<br/>and private comment]
+    H --> I[WhatsApp summary]
 ```
 
-(Optional, recommended) Keep the virtualenv inside the project directory so your editor picks it up automatically:
-```bash
-poetry config virtualenvs.in-project true
-```
+Each forecast call goes into a chain: if its model fails, the call falls through to the next provider instead of failing the question.
 
-### 3. Install dependencies
-From inside the cloned repository:
+| Role | Primary | Falls back to |
+|---|---|---|
+| Forecaster (five calls) | Spread across Claude Opus 4.6, Claude Haiku 4.5, Gemini Flash Lite and gpt oss 120b on Groq | The other models in the same order |
+| Research and summary | Claude Haiku 4.5 | Gemini, then Groq |
+| Parser | gpt 4o mini | Models verified to return structured JSON |
+
+Why five calls over different models and not one model five times: averaging five samples of the same model keeps its blind spots. Mixing models is what FutureSearch, one of the top bots, describes doing, and the cheaper models keep a question well under the cost of five Opus calls.
+
+## What it adds to the template
+
+| Problem | What the template does | What this repository does |
+|---|---|---|
+| A provider is down or rate limited | The question fails | [`FallbackLlm`](backtest/fallback_llm.py) moves to the next provider; [`BalancedLlm`](backtest/balanced_llm.py) spreads the five calls; a sliding window limiter per model waits instead of erroring |
+| A run retries after a network error | Can post a second forecast or comment | [`publication.py`](publication.py) allows one forecast per question and one comment per post, retries the comment past the SDK's budget and names it if it still fails ([docs/publication.md](docs/publication.md)) |
+| More than 100 open questions | The SDK reads only the first page | [`discovery.py`](discovery.py) reads every page and deduplicates by question |
+| Two `asyncio.run()` calls in one process | The template's semaphore breaks on the second loop | The limiter is rebuilt for each event loop |
+| Public repository, public Actions logs | Forecasts for open questions end up in the logs | Three layers of log redaction, because the rules forbid previewing forecasts on open questions |
+| Is a change actually better? | No way to tell | A read only [evaluation lab](docs/track-record.md) that works on the bot's own closed questions only and computes coverage, Brier and log score |
+| Is the bot even running? | You check by hand | A WhatsApp message when it forecasts something new, and another one if the workflow fails |
+| Seasons rotate | Ids come from SDK constants that only move when the SDK is upgraded | Ids pinned in [`tournaments.py`](tournaments.py), with a dated test that fails when a season ends |
+
+## Rules it follows
+
+The tournament has rules for bots, and the parts that matter are enforced in code and checked by tests in [`tests/test_tournament_eligibility.py`](tests/test_tournament_eligibility.py):
+
+* No human in the loop. Nothing in the pipeline waits for a person, and the scored tournaments never get a question forecast twice.
+* Every forecast carries a comment, and comments are always private. Metaculus makes them public on its own schedule.
+* No previewing. The evaluation lab reads closed questions only; reading open ones needs an explicit flag that no workflow passes.
+
+## Running the tests
+
 ```bash
 poetry install
+poetry run python -m unittest discover -s tests -t .
 ```
 
-### 4. Set your API keys
-Copy the template and fill in your real keys:
-```bash
-cp .env.template .env
-```
-Then open `.env` in any text editor and replace each `REPLACE_ME` with your real key. At minimum you need `METACULUS_TOKEN` and one LLM key (`OPENROUTER_API_KEY` is recommended). See the comments inside `.env.template` for where to get each one.
+652 tests, 2 of them skipped because they need a real API key. CI runs them on Python 3.11 and 3.12 with no secrets at all, and every workflow runs with read only repository permissions.
 
-### 5. Run the bot
-**First run — smoke-test against the [bot-testing-area tournament](https://www.metaculus.com/tournament/bot-testing-area/):**
-```bash
-poetry run python main.py --mode test_questions
-```
-You'll see a one-line startup banner, forecasting progress logs, then a `🎉 Bot submitted N forecast(s)` banner with direct links to each forecast on Metaculus.
+## Known limits
 
-**Forecast on the live FutureEval season + MiniBench:**
-```bash
-poetry run python main.py --mode tournament
-```
+Being upfront about these, because they are the next things to fix:
 
-**Forecast on the Metaculus Cup:**
-```bash
-poetry run python main.py --mode metaculus_cup
-```
+* **Research has no live search.** The researcher is a model working from its own knowledge, so recent news can be missing. Adding AskNews (free for tournament participants) is the next change.
+* **No forecasting quality claims yet.** The work so far is about reliability and coverage. Prompts, aggregation and calibration are close to the template's, and there is no measured Brier yet to show an improvement.
+* **Detection is limited by GitHub's scheduler.** Cron asks for a run every five minutes and gets about six a day. A polling window inside each run helps; an external trigger would help more.
+* **Models are pinned by rewriting `main.py` in CI** ([`backtest/pin_models.py`](backtest/pin_models.py)). It works and is tested, but configuring them at runtime would be cleaner.
 
-**Run the no-framework reference implementation instead:**
-```bash
-poetry run python main_with_no_framework.py
-```
-This file has no `--mode` flag; it's controlled by the constants at the top of the file (`SUBMIT_PREDICTION`, `USE_EXAMPLE_QUESTIONS`, `TOURNAMENT_ID`, etc.). Flip `USE_EXAMPLE_QUESTIONS = True` to point it at the bot-testing-area tournament instead of the live AIB.
+## Repository map
 
-To stop publishing forecasts (dry-run mode):
-- `main.py`: set `publish_reports_to_metaculus=False` in the `SummerTemplateBot2026(...)` constructor near the bottom.
-- `main_with_no_framework.py`: set `SUBMIT_PREDICTION = False` at the top.
+| Path | What it is |
+|---|---|
+| [`main.py`](main.py) | The bot: research, forecasting prompts per question type, entry point |
+| [`tournaments.py`](tournaments.py) | Which tournaments it forecasts on |
+| [`publication.py`](publication.py), [`discovery.py`](discovery.py) | Safe publishing and complete discovery |
+| [`backtest/`](backtest/) | Model routing: fallback chains, ensemble, rate limiter, model pinning |
+| [`research/`](research/) | Offline evaluation lab (read only) |
+| [`notifications/`](notifications/) | WhatsApp run summaries |
+| [`docs/`](docs/) | Design notes: [cadence](docs/cadence.md), [publication](docs/publication.md), [track record](docs/track-record.md), [template guide](docs/template-guide.md) |
 
-## Example usage of /news and /deepnews:
-If you are using AskNews, here is some useful example code.
-```python
-from asknews_sdk import AsyncAskNewsSDK
-import asyncio
+## Credits
 
-"""
-More information available here:
-https://docs.asknews.app/en/news
-https://docs.asknews.app/en/deepnews
-
-Installation:
-pip install asknews
-"""
-
-client_id = ""
-client_secret = ""
-
-ask = AsyncAskNewsSDK(
-    client_id=client_id,
-    client_secret=client_secret,
-    scopes=["chat", "news", "stories", "analytics"],
-)
-
-# /news endpoint example
-async def search_news(query):
-
-  hot_response = await ask.news.search_news(
-      query=query, # your natural language query
-      n_articles=5, # control the number of articles to include in the context
-      return_type="both",
-      strategy="latest news" # enforces looking at the latest news only
-  )
-
-  print(hot_response.as_string)
-
-  # get context from the "historical" database that contains a news archive going back to 2023
-  historical_response = await ask.news.search_news(
-      query=query,
-      n_articles=10,
-      return_type="both",
-      strategy="news knowledge" # looks for relevant news within the past 60 days
-  )
-
-  print(historical_response.as_string)
-
-# /deepnews endpoint example:
-async def deep_research(
-    query, sources, model, search_depth=2, max_depth=2
-):
-
-    response = await ask.chat.get_deep_news(
-        messages=[{"role": "user", "content": query}],
-        search_depth=search_depth,
-        max_depth=max_depth,
-        sources=sources,
-        stream=False,
-        return_sources=False,
-        model=model,
-        inline_citations="numbered"
-    )
-
-    print(response)
-
-
-if __name__ == "__main__":
-    query = "What is the TAM of the global market for electric vehicles in 2025? With your final report, please report the TAM in USD using the tags <TAM> ... </TAM>"
-
-    sources = ["asknews"]
-    model = "deepseek-basic"
-    search_depth = 2
-    max_depth = 2
-    asyncio.run(
-        deep_research(
-            query, sources, model, search_depth, max_depth
-        )
-    )
-
-    asyncio.run(search_news(query))
-```
-
-Some tips for DeepNews:
-
-You will get tags in your response, including:
-
-<think> </think>
-<asknews_search> </asknews_search>
-<final_response> </final_response>
-
-These tags are likely useful for extracting the pieces that you need for your pipeline. For example, if you don't want to include all the thinking/searching, you could just extract <final_response> </final_response>
-
-
-## Integrations
-
-The **[integrations/](integrations/)** folder contains example scripts that integrate third-party tools with the bot template. 
-
-See the [integrations README](integrations/README.md) for available integrations and how to add your own.
-
-## Ideas for bot improvements
-You can find some ideas of what you can do to improve this template by taking a look at what other bots have done [here](https://www.metaculus.com/notebooks/43497/what-are-other-bots-doing/). You can also look at research done by Metaculus and the field in the [research section](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#research-reports-and-overview-of-the-field) of the bot resources page. Asking an LLM to read through everything and give ideas may be a decent place to start. Please try to do something new, or something that is a spinoff (or better implementation) of what others have done. We don't want to test the same idea multiple times.
+Built on the [Metaculus bot template](https://github.com/Metaculus/metac-bot-template) and the [forecasting tools](https://github.com/Metaculus/forecasting-tools) package by Metaculus. The upstream template has no license file, so the template code remains theirs; the modules listed above are my own work.
