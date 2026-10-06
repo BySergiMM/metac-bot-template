@@ -134,6 +134,13 @@ jobs:
           # from the parser in production while every E2E passed, because
           # test_bot.yaml had this key and these two did not.
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Gates the researcher's news feed at PATCH time, like the keys
+          # above: pin_models leads the researcher with AskNews only when one
+          # of these is present here. Absent (no secret set) means no change.
+          # Must match the Run bot step; test_production_invariants compares.
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
       # notifications/state.json is the ONLY thing the WhatsApp notifier
       # needs to survive between runs (which events were already sent -- see
       # notifications/state.py's module docstring for why that is the sole
@@ -289,6 +296,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           # Fallback providers. Both verified by research/smoke_test_providers.py
@@ -334,6 +342,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

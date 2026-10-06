@@ -13,6 +13,7 @@ from bot_helpers import (
     log_forecast_content,
     print_run_summary_banner,
     print_startup_banner,
+    register_model_prices,
     silence_noisy_dependencies,
 )
 from publication import PublishingClient, print_publication_report
@@ -47,6 +48,13 @@ from forecasting_tools import (
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
+
+# litellm prices a call from a cost map it downloads at import and falls back
+# to the copy bundled in the wheel when that fails; the locked wheel predates
+# the forecaster's model. Fill the gap before any GeneralLlm is built, so the
+# per-question cost in the logs cannot silently read $0. See bot_helpers.
+for _model in register_model_prices():
+    logger.info("model_price_registered model=%s", _model)
 
 
 class SummerTemplateBot2026(ForecastBot):

@@ -52,6 +52,15 @@ dies at once - parser included. Excluding it would leave the exact failure
 mode this feature exists for (an OpenRouter-wide outage) able to kill the run
 through the one role left unprotected.
 
+AskNews research
+----------------
+With an AskNews credential present at patch time (ASKNEWS_API_KEY, or
+ASKNEWS_CLIENT_ID + ASKNEWS_SECRET) the researcher role leads with
+`asknews/news-summaries`, a GeneralLlm forecasting-tools routes to its
+AskNewsSearcher, and the LLM researcher above moves to the first fallback
+position: real news first, the model's own knowledge if the feed fails. No
+credential, no change. See the note above ACTIVE_ASKNEWS.
+
 Forecaster ensemble
 -------------------
 main.py asks for five predictions per question, and until now all five came
@@ -132,6 +141,20 @@ import sys
 #   claude-haiku-4.5   $1/$5             ~$0.20/question
 #   gpt-4o-mini        cheap, verified 200 OK on this key
 #
+# Forecaster moved to Opus 5.5 on 2026-10-02. Read from OpenRouter's /models
+# API that day: id anthropic/claude-opus-5.5, 12 endpoints, $4/$20 per Mtok,
+# 1M context, 128K max output -- 20% cheaper than Opus 4.6 on both meters.
+#
+#   claude-opus-5.5    $4/$20 per Mtok   ~$0.82/question if used alone
+#                      (an ESTIMATE: the $1.02 Opus 4.6 figure scaled by the
+#                      price ratio, not a measurement of this model's output
+#                      length)
+#
+# The litellm this repo locks (1.80.10) prices this id at exactly those
+# numbers, but only in the cost map it downloads at import; its bundled copy
+# predates the model. bot_helpers.register_model_prices fills that gap, so
+# cost tracking does not silently read $0 on a run whose download failed.
+#
 # The forecaster leads on Opus because Metaculus' own FutureEval writeup found
 # model choice to be the single largest differentiator, and it is the role
 # whose output is scored. Researcher and summarizer get Haiku: they run once
@@ -140,7 +163,7 @@ import sys
 # costs far less than five Opus calls -- which is the same shape FutureSearch
 # publishes ("ensembling across two Opus 4.6 runs and other frontier models").
 DEFAULTS = {
-    "default": "openrouter/anthropic/claude-opus-4.6",
+    "default": "openrouter/anthropic/claude-opus-5.5",
     "researcher": "openrouter/anthropic/claude-haiku-4.5",
     "summarizer": "openrouter/anthropic/claude-haiku-4.5",
     "parser": "openrouter/openai/gpt-4o-mini",
@@ -281,6 +304,55 @@ ACTIVE_PARSER_EXTRA = [
     (model, env_var) for model, env_var in PARSER_EXTRA_CHAIN if os.getenv(env_var)
 ]
 
+# ---------------------------------------------------------------- AskNews
+# Live news for the researcher, gated on a credential exactly like the
+# fallback keys above.
+#
+# Until 2026-10-02 the researcher was a model working from its own training
+# data, so anything that happened after its cutoff was invisible to the
+# forecast. forecasting_tools already routes the model string below to
+# AskNewsSearcher (GeneralLlm._call_asknews): a GeneralLlm built on it is a
+# real backend that returns formatted news articles, so it can lead the
+# researcher's FallbackLlm chain with no new class and no change to main.py's
+# run_research, which already handles a GeneralLlm researcher.
+#
+# What the chain looks like with a credential present:
+#
+#   researcher: [asknews/news-summaries, <configured researcher>, *fallbacks]
+#
+# so an AskNews failure of any kind -- a credential that reaches the pin step
+# but not the run step, a rate limit, an outage -- costs one attempt and the
+# research is produced by the LLM exactly as it was before. This holds even
+# with NO fallback key present: the chain is then [asknews, <configured
+# researcher>], and the FallbackLlm import is emitted for it. With no AskNews credential nothing here runs and the generated
+# block is byte-for-byte what it was.
+#
+# Only the researcher: AskNews returns news, not reasoning, so it has no
+# business in the forecaster ensemble, the summarizer or the parser.
+#
+# AskNewsSearcher accepts ASKNEWS_API_KEY, or ASKNEWS_CLIENT_ID together with
+# ASKNEWS_SECRET. Read once, at import time, for the reason ACTIVE_FALLBACKS
+# is (see above). test_pin_models_chains manages all three names.
+ASKNEWS_MODEL = "asknews/news-summaries"
+ASKNEWS_ENV_VARS = ("ASKNEWS_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET")
+
+
+def _asknews_credential_present(environ) -> bool:
+    """Would AskNewsSearcher() authenticate from this environment?
+
+    Mirrors its constructor: an API key, or the OAuth pair, and not both --
+    it refuses the combination. Half a pair, or both styles at once, keeps
+    the gate shut rather than leading every question with a backend that is
+    certain to raise. test_asknews_research pins this against the real
+    constructor for every combination of the three variables.
+    """
+    has_api_key = bool(environ.get("ASKNEWS_API_KEY"))
+    has_oauth = bool(environ.get("ASKNEWS_CLIENT_ID") and environ.get("ASKNEWS_SECRET"))
+    return has_api_key != has_oauth
+
+
+ACTIVE_ASKNEWS = _asknews_credential_present(os.environ)
+
 # Model strings that backtest.rate_limiter.DEFAULT_LIMITS registers a limiter
 # for. Duplicated here because this file runs as a bare script -- the workflow
 # calls `python backtest/pin_models.py`, so the repo root is not on sys.path
@@ -294,11 +366,13 @@ ACTIVE_PARSER_EXTRA = [
 # Groq's measured 8000 TPM cap.
 RATE_LIMITED_MODELS = frozenset(
     {
+        "asknews/news-summaries",
         "gemini/gemini-3.5-flash-lite",
         "groq/openai/gpt-oss-120b",
         "groq/qwen/qwen3.8-27b",
         "openrouter/anthropic/claude-haiku-4.5",
         "openrouter/anthropic/claude-opus-4.6",
+        "openrouter/anthropic/claude-opus-5.5",
         "openrouter/nvidia/nemotron-3.5-lightning:free",
         "openrouter/openai/gpt-4o-mini",
     }
@@ -491,12 +565,36 @@ def _role_expr(role: str, model: str) -> str:
     if role not in REASONING_ROLES:
         return _backend_expr(model)
     fallbacks = _fallbacks_for(role)
+    if role == "researcher" and ACTIVE_ASKNEWS:
+        # AskNews leads and the configured LLM researcher becomes the first
+        # fallback, so research never dies with the news feed. Wrapped even
+        # with no fallback key, which is why this precedes the bare-backend
+        # return below. See the AskNews note above ACTIVE_ASKNEWS.
+        return _chain_expr(ASKNEWS_MODEL, [model, *fallbacks])
     if not fallbacks:
         return _backend_expr(model)
 
     if role == "default" and len(_ensemble_primaries(model)) > 1:
         return _ensemble_expr(model)
     return _chain_expr(model, fallbacks)
+
+
+def _runtime_chain(role: str, model: str) -> list[str]:
+    """The models one role actually tries at runtime, in order, each once.
+
+    The single source for everything that reasons about a role's chain
+    without generating it: the evaluator in _eval_llms_dict and the --check
+    preflight. Derived from the same helpers _role_expr uses, so the three
+    cannot disagree about which backend leads. For the forecaster ensemble the
+    answer is the first chain's order; the other chains hold the same models
+    with a different lead (asserted separately in _eval_llms_dict).
+    """
+    if role not in REASONING_ROLES:
+        return [model]
+    fallbacks = _fallbacks_for(role)
+    if role == "researcher" and ACTIVE_ASKNEWS:
+        return _chain_models(ASKNEWS_MODEL, [model, *fallbacks])
+    return _chain_models(model, fallbacks)
 
 
 TEMPLATE_HEADER = '''        llms={
@@ -548,8 +646,21 @@ IMPORT_LINE = "from backtest.fallback_llm import FallbackLlm\n"
 BALANCED_IMPORT_LINE = "from backtest.balanced_llm import BalancedLlm\n"
 
 
+def _wants_fallback_wrapper() -> bool:
+    """Does the block about to be generated name FallbackLlm at all?
+
+    True with any fallback key, and true with an AskNews credential alone,
+    because the researcher is then a two-link chain even when nothing else is
+    wrapped. The import and the staleness check in patch() both ask this
+    rather than ACTIVE_FALLBACKS directly, so neither can emit FallbackLlm(
+    without importing it.
+    """
+    return bool(ACTIVE_FALLBACKS) or ACTIVE_ASKNEWS
+
+
 def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
-    """Add the FallbackLlm import once, only when a fallback chain is active.
+    """Add the FallbackLlm import once, only when the block names FallbackLlm
+    (a fallback key, or an AskNews credential -- see _wants_fallback_wrapper).
     Idempotent and independent of whether the llms= block itself is patched
     yet, so re-running after an env change (a key added or removed) converges
     to the right import state on the next invocation either way.
@@ -560,7 +671,8 @@ def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
     resolved model names, and the ensemble's shape depends on them (see
     _ensemble_primaries)."""
     has_import = IMPORT_LINE in src
-    if ACTIVE_FALLBACKS and not has_import:
+    wants_import = _wants_fallback_wrapper()
+    if wants_import and not has_import:
         if IMPORT_ANCHOR not in src:
             raise LookupError(
                 "import anchor not found in main.py; upstream template changed"
@@ -570,7 +682,7 @@ def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
         # BalancedLlm(...) without importing it and only a second run would
         # fix it -- which also breaks the idempotency the selftest asserts.
         src = src.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + IMPORT_LINE, 1)
-    elif not ACTIVE_FALLBACKS and has_import:
+    elif not wants_import and has_import:
         src = src.replace(IMPORT_LINE, "", 1)
 
     # The balanced import follows the same converge-either-way rule, so adding
@@ -641,11 +753,15 @@ def patch(src: str, models: dict[str, str]) -> str:
     span = _llms_block_span(src)
     if span is not None:
         current_block = src[span[0] : span[1]]
-        wants_fallback = bool(ACTIVE_FALLBACKS)
+        wants_fallback = _wants_fallback_wrapper()
         has_fallback = "FallbackLlm(" in current_block
-        if wants_fallback == has_fallback:
-            return src  # already active and already matches the current fallback state
-        # Stale: fallback keys were added/removed since this block was written.
+        # Same test for AskNews: a credential added or removed since the block
+        # was written must rebuild it, or the researcher keeps a news feed it
+        # cannot authenticate, or never gains one it could.
+        has_asknews = ASKNEWS_MODEL in current_block
+        if wants_fallback == has_fallback and ACTIVE_ASKNEWS == has_asknews:
+            return src  # already active and already matches the current credential state
+        # Stale: keys were added/removed since this block was written.
         # Rebuild it in place rather than leaving an import/usage mismatch.
         return src[: span[0]] + build_block(models) + src[span[1] :]
 
@@ -697,8 +813,20 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
         expected_fallbacks = _fallbacks_for(role) if active_fallbacks else []
         # The chain as the generator emits it: primary first, each backend once.
         primary = _parser_primary(models[role]) if role == "parser" else models[role]
-        expected_chain = _chain_models(primary, expected_fallbacks)
-        if expected_fallbacks:
+        expected_chain = _runtime_chain(role, primary)
+        # Wrapped exactly when the generator wraps: a fallback behind the
+        # primary, or AskNews in front of the researcher (which wraps even
+        # with no fallback key at all).
+        wrapped = bool(expected_fallbacks) or (role == "researcher" and ACTIVE_ASKNEWS)
+        if role == "researcher" and ACTIVE_ASKNEWS:
+            assert expected_chain[0] == ASKNEWS_MODEL
+            # Unless models.txt itself names AskNews as the researcher, in
+            # which case there is no separate LLM to stand behind it.
+            assert primary == ASKNEWS_MODEL or expected_chain[1:2] == [primary], (
+                f"{role}: the configured LLM must be the first fallback behind "
+                f"AskNews, got {expected_chain}"
+            )
+        if wrapped:
             entry = result[role]
             if role == "default" and len(_ensemble_primaries(models[role])) > 1:
                 # One chain per PRIMARY model. Every chain must still carry the
@@ -760,7 +888,7 @@ def selftest() -> None:
     ACTIVE_FALLBACKS reflects whatever keys are actually set when this module was
     imported, so every check below reads that real value rather than hardcoding [].
     """
-    global ACTIVE_FALLBACKS
+    global ACTIVE_FALLBACKS, ACTIVE_ASKNEWS
     stub = IMPORT_ANCHOR + "\n" + BOT_INIT_ANCHOR + "        a=1,\n" + ANCHOR + "    )\n"
     once = patch(stub, DEFAULTS)
     assert "# llms={" not in once, "comment markers survived the patch"
@@ -855,12 +983,46 @@ def selftest() -> None:
         _eval_llms_dict(with_fb, ACTIVE_FALLBACKS, DEFAULTS)  # real dict, correct backend count per role
         assert patch(with_fb, DEFAULTS) == with_fb  # idempotent with fallback active too
 
-        # Import must disappear again if the chain goes back to empty (keys removed).
+        # Import must disappear again if the chain goes back to empty (keys
+        # removed) -- unless an AskNews credential still needs it for the
+        # researcher's two-link chain.
         ACTIVE_FALLBACKS = []
         reverted = patch(with_fb, DEFAULTS)
-        assert IMPORT_LINE not in reverted
+        assert (IMPORT_LINE in reverted) == ACTIVE_ASKNEWS
     finally:
         ACTIVE_FALLBACKS = saved_fallbacks
+
+    # AskNews wiring, simulated both ways independent of this process's
+    # environment. With a credential the researcher leads with the news feed
+    # and the configured LLM stands directly behind it -- with no fallback
+    # key present too, which is the case that needs the import on its own.
+    # Without one, nothing in the block mentions AskNews.
+    saved_asknews = ACTIVE_ASKNEWS
+    try:
+        for fallbacks in ([], list(FALLBACK_CHAIN)):
+            ACTIVE_FALLBACKS = fallbacks
+            ACTIVE_ASKNEWS = True
+            with_news = patch(stub, DEFAULTS)
+            assert IMPORT_LINE in with_news
+            evaluated = _eval_llms_dict(with_news, ACTIVE_FALLBACKS, DEFAULTS)
+            served = [b.model for b in evaluated["researcher"].backends]
+            assert served[:2] == [ASKNEWS_MODEL, DEFAULTS["researcher"]], served
+            for role in ("default", "summarizer", "parser"):
+                assert ASKNEWS_MODEL not in _role_expr(role, DEFAULTS[role]), (
+                    f"AskNews leaked into the {role} role"
+                )
+            assert patch(with_news, DEFAULTS) == with_news  # idempotent
+            # Credential removed: the block converges back, in place.
+            ACTIVE_ASKNEWS = False
+            without_news = patch(with_news, DEFAULTS)
+            assert ASKNEWS_MODEL not in without_news
+            assert without_news == patch(stub, DEFAULTS), (
+                "removing the AskNews credential must give the same block as "
+                "never having had one"
+            )
+    finally:
+        ACTIVE_FALLBACKS = saved_fallbacks
+        ACTIVE_ASKNEWS = saved_asknews
 
     tmp = pathlib.Path("/tmp/_pin_models_selftest.txt")
     tmp.write_text("parser: x/y  # trailing comment\n\n# whole-line comment\n")
@@ -877,6 +1039,8 @@ def selftest() -> None:
 
 def _ping(model: str) -> str | None:
     """One minimal completion. Returns None on success, the error text on failure."""
+    if model.startswith("asknews/"):
+        return _ping_asknews(model)
     import litellm
 
     try:
@@ -894,6 +1058,34 @@ def _ping(model: str) -> str | None:
         return head
 
 
+def _ping_asknews(model: str) -> str | None:
+    """One real news search through the same path the bot uses at runtime.
+
+    litellm has no AskNews provider, so the generic ping above would report
+    this model dead on every run and say nothing about the credential. This
+    asks AskNewsSearcher directly, which is what GeneralLlm._call_asknews
+    does, so a FAIL here is the failure the researcher's first link would hit
+    -- and a FAIL here alone never fails the role, because the configured LLM
+    stands behind it in the chain.
+    """
+    import asyncio
+
+    from forecasting_tools import AskNewsSearcher
+
+    try:
+        asyncio.run(
+            AskNewsSearcher().call_preconfigured_version(
+                model, "What is the latest news about the Metaculus forecasting platform?"
+            )
+        )
+        print(f"  ok    {model}")
+        return None
+    except Exception as exc:  # noqa: BLE001 - any failure here is disqualifying
+        head = str(exc).replace("\n", " ")[:300]
+        print(f"  FAIL  {model}: {head}")
+        return head
+
+
 def check_models(models: dict[str, str]) -> list[str]:
     """Ping every distinct model that could actually be called at runtime -
     primaries and every fallback backend - and return the roles that have NO
@@ -901,18 +1093,21 @@ def check_models(models: dict[str, str]) -> list[str]:
     NOT a failure: that is exactly the scenario fallback exists for. Testing
     only `models` (the primaries) would make --check block on a transient
     OpenRouter outage that FallbackLlm would have silently absorbed."""
-    fallback_models = [m for m, _env in ACTIVE_FALLBACKS]
-    all_models = sorted(set(models.values()) | set(fallback_models))
+    # The chain each role tries at runtime, from the same helper the
+    # evaluator uses, so --check pings AskNews when the researcher leads with
+    # it, and pings the parser-only extra (PARSER_EXTRA_CHAIN), which the
+    # previous primaries-plus-ACTIVE_FALLBACKS set never reached. When
+    # fallback is active, parser is wrapped exactly like the reasoning roles
+    # (see REASONING_ROLES / docstring). With no fallback keys present every
+    # chain is its primary alone and this degrades to "dead primary = dead
+    # role", the pre-fallback behavior.
+    chains = {role: _runtime_chain(role, models[role]) for role in DEFAULTS}
+    all_models = sorted({m for chain in chains.values() for m in chain})
     results = {m: _ping(m) for m in all_models}
 
     dead_roles = []
     for role in ("default", "researcher", "summarizer", "parser"):
-        # When fallback is active, parser is wrapped exactly like the
-        # reasoning roles (see REASONING_ROLES / docstring). With no fallback
-        # keys present, fallback_models is empty and this degrades to "dead
-        # primary = dead role", the pre-fallback behavior.
-        chain = [models[role]] + (_fallbacks_for(role) if role in REASONING_ROLES else [])
-        if all(results[m] is not None for m in chain):
+        if all(results[m] is not None for m in chains[role]):
             dead_roles.append(role)
     return dead_roles
 
