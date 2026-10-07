@@ -76,21 +76,24 @@ class NoReforecastTests(unittest.TestCase):
         self.assertIn("skip_previously_forecasted_questions=True", read("main.py"))
 
     def test_the_only_override_is_the_practice_area(self):
-        """One branch sets it False: the unscored bot-testing-area. The Cup
-        used to be the second, until production started running it on a
-        schedule (2026-10-01); it now forecasts each question once."""
+        """Two branches set it False: the unscored bot-testing-area, and
+        Market Pulse, whose market_pulse.select already did the skipping
+        (new questions plus a refresh before its spot-scored close). The Cup
+        used to be one, until production started running it on a schedule
+        (2026-10-01); it now forecasts each question once."""
         src = read("main.py")
         overrides = [
             i for i, line in enumerate(src.splitlines())
             if "skip_previously_forecasted_questions = False" in line
         ]
-        self.assertEqual(len(overrides), 1, "unexpected number of overrides")
+        self.assertEqual(len(overrides), 2, "unexpected number of overrides")
         lines = src.splitlines()
         for index in overrides:
             context = "\n".join(lines[max(0, index - 12):index + 3])
-            self.assertIn(
-                'run_mode == "test_questions"', context,
-                "an override sits outside test_questions",
+            self.assertTrue(
+                'run_mode == "test_questions"' in context
+                or 'run_mode == "market_pulse"' in context,
+                "an override sits outside test_questions and market_pulse",
             )
 
     def test_the_tournament_branch_does_not_disable_dedup(self):
@@ -223,12 +226,13 @@ class TestsNeverPublishTests(unittest.TestCase):
 
 class ProductionTargetTests(unittest.TestCase):
     def test_the_tournament_workflow_runs_the_unmodified_entry_point(self):
-        """The scored poll loop uses the default mode. The only --mode in the
-        file is the Cup's practice step, which runs after the loop."""
+        """The scored poll loop uses the default mode. The only --mode flags
+        in the file are the steps after the loop: the Cup (practice) and
+        Market Pulse (prize, refreshed before close)."""
         src = read(".github", "workflows", "run_bot_on_tournament.yaml")
         self.assertIn("poetry run python main.py 2>&1 | tee", src)
         self.assertEqual(
-            re.findall(r"--mode\s+(\S+)", src), ["metaculus_cup"],
+            re.findall(r"--mode\s+(\S+)", src), ["metaculus_cup", "market_pulse"],
             "production must use the default mode for the scored tournament",
         )
 

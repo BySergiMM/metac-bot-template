@@ -48,6 +48,17 @@ class PinnedTargetsTests(unittest.TestCase):
         self.assertIn("metaculus-cup-fall-2026", tournaments.METACULUS_CUP.url)
         self.assertFalse(tournaments.METACULUS_CUP.prize_eligible)
 
+    def test_market_pulse_is_the_bot_eligible_26q4_challenge(self):
+        """'compete for prizes using a forecasting bot account' and 'The ID
+        for this tournament is "market-pulse-26q4"', from its page."""
+        self.assertEqual(tournaments.MARKET_PULSE.id, "market-pulse-26q4")
+        self.assertTrue(tournaments.MARKET_PULSE.prize_eligible)
+        self.assertEqual(tournaments.MARKET_PULSE.ends_on, date(2026, 12, 31))
+
+    def test_the_market_pulse_mode_targets_the_pinned_project(self):
+        src = code_lines(read("main.py"))
+        self.assertIn("tournaments.MARKET_PULSE.id", src)
+
     def test_main_reads_no_sdk_current_constant(self):
         """The SDK constants move only when the SDK is upgraded, which is
         exactly how 33022 outlived its season."""
@@ -92,7 +103,7 @@ class SeasonEndTests(unittest.TestCase):
 
     def test_a_warning_names_the_season_and_the_fix(self):
         warnings = tournaments.season_warnings(date(2027, 1, 7))
-        self.assertEqual(len(warnings), 2)  # the FutureEval season and the Cup
+        self.assertEqual(len(warnings), 3)  # FutureEval, the Cup and Market Pulse
         for line in warnings:
             self.assertTrue(line.startswith("::warning::"))
             self.assertIn("tournaments.py", line)

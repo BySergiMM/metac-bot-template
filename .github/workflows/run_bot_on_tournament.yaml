@@ -347,6 +347,32 @@ jobs:
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # PRIZES. Market Pulse Challenge 26Q4 (tournaments.MARKET_PULSE): $7,500,
+      # bot-eligible, ~65 numeric group subquestions on earnings and markets.
+      # Outside the poll window for the same reason as the Cup: it always has
+      # open questions, which would defeat the window's early exit.
+      #
+      # Spot scored at each close, so the market_pulse mode forecasts new
+      # questions AND refreshes those closing within 36h whose last forecast is
+      # 18h+ old (market_pulse.py). At ~6 delivered runs a day that is one or
+      # two refreshes per question; a run with nothing due costs one discovery.
+      # A failed Cup run (practice) must not cost a prize-scored refresh.
+      - name: Forecast Market Pulse questions (prize)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 90
+        run: poetry run python main.py --mode market_pulse
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       # Runs whether "Run bot" succeeded or failed, so a partial run's
       # already-sent events are still remembered. actions/cache/save is a
       # no-op (not an error) if this exact key was already saved earlier in
