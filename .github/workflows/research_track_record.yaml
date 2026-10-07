@@ -37,7 +37,7 @@ on:
       tournaments:
         description: "Tournaments forming the coverage denominator (space separated)"
         required: false
-        default: "33022 minibench"
+        default: "33121 minibench 33108"
 
 # Least privilege: this job reads the checkout and nothing else. It cannot
 # write to the repository, open a PR, or publish a package.
@@ -88,7 +88,9 @@ jobs:
       # part of the forecasting SDK, and installing it grants no ability to
       # reach Metaculus beyond what MetaculusReadClient already does with
       # urllib -- so it's safe here and lets the three real network
-      # kill-switch tests run for real instead of being skipped.
+      # kill-switch tests run for real instead of being skipped. PyYAML is
+      # the same kind of thing: a parser the workflow-invariant tests use to
+      # read .github/workflows/*.yaml, with no network or forecasting reach.
       #
       # The selection below is an explicit, named exclude list (not a broad
       # file-pattern skip) so the other forecasting_tools-independent checks
@@ -97,15 +99,18 @@ jobs:
       # without the list being updated fails loudly, not silently.
       - name: Unit tests (offline subset; forecasting_tools stays uninstalled)
         run: |
-          pip install --quiet "requests>=2.32.3,<3.0.0"
+          pip install --quiet "requests>=2.32.3,<3.0.0" "pyyaml>=6,<7"
           python - <<'PYEOF'
           import sys
           import unittest
 
-          # Whole modules that import the real forecasting_tools client at
+          # Whole modules that import the real forecasting_tools client (or
+          # litellm, the LLM layer under it) at
           # module scope and therefore cannot be collected without it.
           BLOCKED_MODULES = {
+              "tests.test_asknews_research",
               "tests.test_discovery",
+              "tests.test_model_prices",
               "tests.test_pipeline_hostile_model",
               "tests.test_publication",
           }
@@ -242,7 +247,7 @@ jobs:
         if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          TOURNAMENTS: ${{ github.event.inputs.tournaments || '33022 minibench' }}
+          TOURNAMENTS: ${{ github.event.inputs.tournaments || '33121 minibench 33108' }}
         run: |
           read -r -a tournaments <<< "$TOURNAMENTS"
           python research/fetch_own_track_record.py \
