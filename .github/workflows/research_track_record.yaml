@@ -37,7 +37,7 @@ on:
       tournaments:
         description: "Tournaments forming the coverage denominator (space separated)"
         required: false
-        default: "33022 minibench"
+        default: "33121 minibench 33108"
 
 # Least privilege: this job reads the checkout and nothing else. It cannot
 # write to the repository, open a PR, or publish a package.
@@ -247,7 +247,7 @@ jobs:
         if: ${{ github.event.inputs.mode == 'fetch' || github.event.inputs.mode == '' }}
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          TOURNAMENTS: ${{ github.event.inputs.tournaments || '33022 minibench' }}
+          TOURNAMENTS: ${{ github.event.inputs.tournaments || '33121 minibench 33108' }}
         run: |
           read -r -a tournaments <<< "$TOURNAMENTS"
           python research/fetch_own_track_record.py \
