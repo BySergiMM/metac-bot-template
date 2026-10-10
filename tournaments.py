@@ -67,7 +67,20 @@ METACULUS_CUP = Project(
     prize_eligible=False,
 )
 
-ALL = (FUTUREEVAL, MINIBENCH, METACULUS_CUP)
+#: Market Pulse Challenge 26Q4: $7,500, ends 31 Dec 2026. Its tournament
+#: page: "You are welcome to enter this tournament and compete for prizes
+#: using a forecasting bot account, but you can only enter the competition
+#: once" -- so the owner's human account must not forecast here. Spot scored
+#: at each question's close, which is why market_pulse.py refreshes forecasts
+#: shortly before close instead of forecasting once.
+MARKET_PULSE = Project(
+    id="market-pulse-26q4",
+    url="https://www.metaculus.com/tournament/market-pulse-26q4/",
+    ends_on=date(2026, 12, 31),
+    prize_eligible=True,
+)
+
+ALL = (FUTUREEVAL, MINIBENCH, METACULUS_CUP, MARKET_PULSE)
 
 
 def ended(projects: tuple[Project, ...], today: date) -> list[Project]:

@@ -19,6 +19,7 @@ from bot_helpers import (
     silence_noisy_dependencies,
 )
 from publication import PublishingClient, print_publication_report
+import market_pulse
 import tournaments
 
 silence_noisy_dependencies()
@@ -773,12 +774,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["tournament", "metaculus_cup", "test_questions"],
+        choices=["tournament", "metaculus_cup", "market_pulse", "test_questions"],
         default="tournament",
         help="What to forecast on (default: tournament)",
     )
     args = parser.parse_args()
-    run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
+    run_mode: Literal["tournament", "metaculus_cup", "market_pulse", "test_questions"] = args.mode
 
     check_environment(strict=True)
     # Keep forecast reasoning and prediction values out of this process's log
@@ -834,6 +835,7 @@ if __name__ == "__main__":
     TOURNAMENT_URLS = {
         "tournament": tournaments.FUTUREEVAL.url,
         "metaculus_cup": tournaments.METACULUS_CUP.url,
+        "market_pulse": tournaments.MARKET_PULSE.url,
         "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
     }
 
@@ -864,6 +866,24 @@ if __name__ == "__main__":
         forecast_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.METACULUS_CUP.id, return_exceptions=True
+            )
+        )
+    elif run_mode == "market_pulse":
+        # Pays bots, but spot scored at each question's close, so "forecast
+        # once when first seen" would leave a stale forecast standing at the
+        # one instant that counts. market_pulse.select does the skipping
+        # (new questions, plus a refresh shortly before close), so the bot's
+        # own skip is lifted for this mode only.
+        template_bot.skip_previously_forecasted_questions = False
+        forecast_reports = asyncio.run(
+            template_bot.forecast_questions(
+                market_pulse.select(
+                    client.get_all_open_questions_from_tournament(
+                        tournaments.MARKET_PULSE.id
+                    ),
+                    datetime.now(timezone.utc),
+                ),
+                return_exceptions=True,
             )
         )
     elif run_mode == "test_questions":

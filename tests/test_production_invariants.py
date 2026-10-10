@@ -444,7 +444,7 @@ class WorkflowInvariants(unittest.TestCase):
         practice-area mode is the one that may still re-forecast."""
         src = read("main.py")
         start = src.index('elif run_mode == "metaculus_cup":')
-        end = src.index('elif run_mode == "test_questions":')
+        end = src.index('elif run_mode == "market_pulse":')
         cup_branch = "\n".join(
             line for line in src[start:end].splitlines()
             if not line.strip().startswith("#")
