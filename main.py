@@ -6,6 +6,8 @@ from typing import Literal
 
 import dotenv
 
+import forecast_guards
+
 # Runtime helpers (env validation, banners, dependency-warning suppression).
 from bot_helpers import (
     check_environment,
@@ -17,7 +19,6 @@ from bot_helpers import (
     silence_noisy_dependencies,
 )
 from publication import PublishingClient, print_publication_report
-import forecast_guards
 import tournaments
 
 silence_noisy_dependencies()
