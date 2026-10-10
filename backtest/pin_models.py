@@ -158,10 +158,9 @@ import sys
 # The forecaster leads on Opus because Metaculus' own FutureEval writeup found
 # model choice to be the single largest differentiator, and it is the role
 # whose output is scored. Researcher and summarizer get Haiku: they run once
-# per question and summarise rather than judge. The ensemble then spreads the
-# five forecast calls across Opus, Haiku and the free providers, so a question
-# costs far less than five Opus calls -- which is the same shape FutureSearch
-# publishes ("ensembling across two Opus 4.6 runs and other frontier models").
+# per question and summarise rather than judge. All five forecast calls go to
+# the forecaster (see FORECAST_GRADE for why the cheap fallbacks no longer
+# vote), which costs more per question and is where the score is decided.
 DEFAULTS = {
     "default": "openrouter/anthropic/claude-opus-5.5",
     "researcher": "openrouter/anthropic/claude-haiku-4.5",
@@ -185,9 +184,9 @@ DEFAULTS = {
 #   Cerebras  402 "Payment required to access this resource" - no free tier
 #   Metaculus 400 "You don't have an allowance for model <gpt-4o-mini>"
 FALLBACK_CHAIN = [
-    # Haiku leads the fallbacks AND becomes the ensemble's second primary: it
-    # is the cheapest frontier-family model this key can reach, so it buys
-    # model diversity for the forecaster at a fifth of Opus' price.
+    # Haiku leads the fallbacks: same provider and key as the primary, so it
+    # is the closest substitute when Opus fails. It no longer votes in the
+    # forecaster ensemble; see FORECAST_GRADE.
     ("openrouter/anthropic/claude-haiku-4.5", "OPENROUTER_API_KEY"),
     ("gemini/gemini-3.5-flash-lite", "GEMINI_API_KEY"),
     ("groq/openai/gpt-oss-120b", "GROQ_API_KEY"),
@@ -483,17 +482,41 @@ def _fallbacks_for(role: str) -> list[str]:
 # every emitted bucket key is registered - an unregistered key silently
 # resolves to an UNTHROTTLED limiter, which would quietly disable Groq's 8000
 # TPM cap.
+# WHICH FALLBACKS MAY ALSO FORECAST -- corrected 2026-10-10.
+#
+# The ensemble above used to promote EVERY active fallback to a primary. With
+# all three keys present that was Opus + Haiku 4.5 + Gemini Flash Lite +
+# gpt-oss-120b, and the five forecast calls spread over four chains: one or
+# two came from Opus, the rest from models chosen for being cheap and fast.
+# The binary median of five is then usually a weak model's number. Measured on
+# 141 resolved questions: mean peer -0.81, and binary direction 75.9% against
+# 74.1% for answering NO to everything.
+#
+# What FutureSearch ensembles is "other FRONTIER models"; what Metaculus'
+# Spring 2026 survey found predictive was the frontier model doing the final
+# forecast, and high-reasoning variants beating standard ones 8 of 8. Cheap
+# fallbacks earn their place as fallbacks, not as voters.
+#
+# So a fallback joins the ensemble only if it is listed here. Empty today:
+# every forecast comes from the configured default (Opus), and the fallbacks
+# still catch it on failure. To add a second frontier voter (e.g. a GPT-5.x
+# high-reasoning model), verify it through research/smoke_test_providers.py
+# first -- the sponsored key only reaches openai/anthropic/google -- then add
+# it to FALLBACK_CHAIN and here.
+FORECAST_GRADE: frozenset[str] = frozenset()
+
+
 def _ensemble_primaries(model: str) -> list[str]:
     """The distinct primary models the forecaster ensembles over.
 
     ``model`` (the configured default, overridable via models.txt) leads, then
-    every active fallback that is not already it, in the production order
-    OpenRouter -> Gemini -> Groq. With no fallback keys present this is a
-    single entry and the caller emits exactly what it emitted before.
+    every active fallback that is FORECAST_GRADE and not already it, in the
+    production order. With none, this is a single entry and the forecaster is
+    one fallback chain led by ``model``.
     """
     primaries = [model]
     for fb_model, _env in ACTIVE_FALLBACKS:
-        if fb_model not in primaries:
+        if fb_model in FORECAST_GRADE and fb_model not in primaries:
             primaries.append(fb_model)
     return primaries
 
@@ -507,8 +530,12 @@ def _ensemble_expr(model: str) -> str:
     """
     primaries = _ensemble_primaries(model)
     chains = []
+    # The fallbacks that do not vote still back every chain, after the other
+    # voters: a voter that fails must degrade exactly as the single-chain
+    # forecaster would, not lose the cheap rungs FORECAST_GRADE left out.
+    non_voting = [fb for fb, _env in ACTIVE_FALLBACKS if fb not in primaries]
     for primary in primaries:
-        others = [m for m in primaries if m != primary]
+        others = [m for m in primaries if m != primary] + non_voting
         chains.append(_chain_expr(primary, others, indent=16))
     joined = ",\n                ".join(chains)
     keys = ", ".join(f'"{p}"' for p in primaries)

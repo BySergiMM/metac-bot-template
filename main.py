@@ -17,6 +17,7 @@ from bot_helpers import (
     silence_noisy_dependencies,
 )
 from publication import PublishingClient, print_publication_report
+import forecast_guards
 import tournaments
 
 silence_noisy_dependencies()
@@ -39,6 +40,7 @@ from forecasting_tools import (
     PredictionTypes,
     PredictionAffirmed,
     BinaryPrediction,
+    PredictedOption,
     PredictedOptionList,
     ReasonedPrediction,
     SmartSearcher,
@@ -193,6 +195,15 @@ class SummerTemplateBot2026(ForecastBot):
 
     _structure_output_validation_samples = 2
 
+    def _timing(self, question: MetaculusQuestion) -> str:
+        """Today, close and resolution dates, and the stale-knowledge warning,
+        for every prompt; see forecast_guards.timing_context."""
+        return forecast_guards.timing_context(
+            datetime.now(timezone.utc),
+            question.close_time,
+            question.scheduled_resolution_time,
+        )
+
     ##################################### RESEARCH #####################################
 
     async def run_research(self, question: MetaculusQuestion) -> str:
@@ -204,11 +215,17 @@ class SummerTemplateBot2026(ForecastBot):
                 f"""
                 You are an assistant to a superforecaster.
                 The superforecaster will give you a question they intend to forecast on.
-                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
-                You do not produce forecasts yourself.
+                To be a great assistant, you generate a concise but detailed rundown of the most relevant facts, recent news, base rates for similar events, and the current value of any quantity the question asks about.
+                Date every fact you give. When you do not have information from close to today, say so plainly instead of filling the gap: a confident but outdated rundown is worse than an honest "unknown".
+                You do not produce forecasts yourself, and you do not say how the question will resolve.
+
+                {self._timing(question)}
 
                 Question:
                 {question.question_text}
+
+                Background:
+                {question.background_info}
 
                 This question's outcome will be determined by the specific criteria below:
                 {question.resolution_criteria}
@@ -272,7 +289,7 @@ class SummerTemplateBot2026(ForecastBot):
             Your research assistant says:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            {self._timing(question)}
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
@@ -304,7 +321,9 @@ class SummerTemplateBot2026(ForecastBot):
             model=self.get_llm("parser", "llm"),
             num_validation_samples=self._structure_output_validation_samples,
         )
-        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        # 3%/97%, not the SDK's 1%/99%: see forecast_guards for the peer-score
+        # arithmetic behind the cap.
+        decimal_pred = forecast_guards.clip_binary(binary_prediction.prediction_in_decimal)
 
         log_forecast_content(
             logger,
@@ -339,7 +358,7 @@ class SummerTemplateBot2026(ForecastBot):
             Your research assistant says:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            {self._timing(question)}
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
@@ -348,6 +367,7 @@ class SummerTemplateBot2026(ForecastBot):
 
             {self._get_conditional_disclaimer_if_necessary(question)}
             You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
+            If one option describes nothing happening (for example "none", "not filed", "no announcement", "other"), say which one it is and give it substantial probability unless the research gives a dated source showing the change is already under way.
 
             The last thing you write is your final probabilities for the N options in this order {question.options} as:
             Option_A: Probability_A
@@ -382,6 +402,20 @@ class SummerTemplateBot2026(ForecastBot):
             model=self.get_llm("parser", "llm"),
             num_validation_samples=self._structure_output_validation_samples,
             additional_instructions=parsing_instructions,
+        )
+
+        # A floor on every option before the per-option mean the SDK takes
+        # across the five predictions, so no single call can leave an option
+        # near zero. The values already sum to 1, so the validator re-run by
+        # this constructor leaves them as they are.
+        floored = forecast_guards.floor_options(
+            [o.probability for o in predicted_option_list.predicted_options]
+        )
+        predicted_option_list = PredictedOptionList(
+            predicted_options=[
+                PredictedOption(option_name=o.option_name, probability=p)
+                for o, p in zip(predicted_option_list.predicted_options, floored)
+            ]
         )
 
         log_forecast_content(
@@ -420,7 +454,7 @@ class SummerTemplateBot2026(ForecastBot):
             Your research assistant says:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            {self._timing(question)}
 
             {lower_bound_message}
             {upper_bound_message}
@@ -516,7 +550,7 @@ class SummerTemplateBot2026(ForecastBot):
             Your research assistant says:
             {research}
 
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            {self._timing(question)}
 
             {lower_bound_message}
             {upper_bound_message}

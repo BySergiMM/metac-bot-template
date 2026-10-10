@@ -96,11 +96,12 @@ class GeneratedBlockTests(unittest.TestCase):
             self.assertNotIn(env_var, block)
         self.assertIn("FallbackLlm", block)
 
-    def test_single_key_output_still_ensembles_the_forecaster(self):
-        """The other half of the above: with one Gemini credential the default
-        role must STILL ensemble across primary models, or the change silently
-        reverts to five samples of one model."""
+    def test_a_forecast_grade_fallback_still_ensembles_the_forecaster(self):
+        """The ensemble machinery survives FORECAST_GRADE being empty today:
+        list a fallback as forecast grade and the default role ensembles
+        across it again, while the once-per-question roles stay single."""
         pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm.FORECAST_GRADE = frozenset({GEMINI})
         block = pm.build_block(pm.DEFAULTS)
         default_entry = block[block.index('"default"'):block.index('"summarizer"')]
         self.assertIn("BalancedLlm", default_entry)
@@ -248,13 +249,26 @@ class ChainsNameEachBackendOnceTests(unittest.TestCase):
         self.assertEqual(chains["summarizer"], [[HAIKU, GEMINI, GROQ_OSS]])
         self.assertEqual(
             chains["parser"], [[GPT_4O_MINI, HAIKU, GEMINI, GROQ_QWEN]])
-        # The forecaster ensemble: one chain per primary, that primary first and
-        # the others behind it in primary order.
+        # The forecaster: Opus answers all five calls; the cheap models only
+        # catch a failure. They used to be ensemble voters, which put three
+        # or four of every five forecasts on them (see FORECAST_GRADE).
+        self.assertEqual(chains["default"], [[OPUS, HAIKU, GEMINI, GROQ_OSS]])
+
+    def test_cheap_fallbacks_never_vote_in_the_forecaster_ensemble(self):
+        pm = load(**self.PRODUCTION)
+        self.assertEqual(pm._ensemble_primaries(pm.DEFAULTS["default"]), [OPUS])
+        for cheap in (HAIKU, GEMINI, GROQ_OSS):
+            self.assertNotIn(cheap, pm.FORECAST_GRADE)
+
+    def test_a_forecast_grade_fallback_gets_its_own_chain(self):
+        """How a second frontier voter would be wired: one chain per primary,
+        that primary first and the others behind it in primary order."""
+        pm = load(**self.PRODUCTION)
+        pm.FORECAST_GRADE = frozenset({GEMINI})
+        chains = chains_by_role(pm, pm.DEFAULTS)
         self.assertEqual(chains["default"], [
-            [OPUS, HAIKU, GEMINI, GROQ_OSS],
-            [HAIKU, OPUS, GEMINI, GROQ_OSS],
+            [OPUS, GEMINI, HAIKU, GROQ_OSS],
             [GEMINI, OPUS, HAIKU, GROQ_OSS],
-            [GROQ_OSS, OPUS, HAIKU, GEMINI],
         ])
 
     def test_an_override_naming_a_fallback_model_does_not_repeat_it(self):
@@ -280,6 +294,7 @@ class ImportWiringTests(unittest.TestCase):
 
     def test_balanced_import_is_added_exactly_once_and_is_idempotent(self):
         pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm.FORECAST_GRADE = frozenset({GEMINI})
         once = pm.patch(self._main_src(), pm.DEFAULTS)
         self.assertIn("from backtest.balanced_llm import", once)
         self.assertEqual(once.count("from backtest.balanced_llm import"), 1)
@@ -314,6 +329,7 @@ class ImportWiringTests(unittest.TestCase):
         """Converge-either-way: a source patched WITH the import must lose it
         when the keys that justified it are gone."""
         pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm.FORECAST_GRADE = frozenset({GEMINI})
         balanced = pm.patch(self._main_src(), pm.DEFAULTS)
         self.assertIn("from backtest.balanced_llm import", balanced)
         pm = load()  # no fallback keys: nothing to balance or fall back to
