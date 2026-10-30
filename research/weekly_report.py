@@ -354,7 +354,7 @@ def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] =
         log(f"calibration_failed reason={type(exc).__name__}")
         calib = None
     # Counts only: these logs are public.
-    log(f"calibration binary={calib and calib['binary']} continuous={calib and calib['continuous']}"
+    log(f"calibration binary={calib and calib['binary']} multiple_choice={calib and calib['multiple_choice']} continuous={calib and calib['continuous']}"
         f" skipped={calib and calib['skipped']}")
     for t in (calib or {}).get("not_current") or []:
         log("calibration_not_current " + " ".join(f"{k}={v}" for k, v in t.items()))
