@@ -14,7 +14,9 @@ What it reports, per tournament the bot plays:
   * coverage for FutureEval, MiniBench (current and previous round) and
     Market Pulse: questions whose scheduled close fell in the week, and how
     many of them carry no forecast of the bot's (roadmap A12; the same
-    audit research/health_check.py runs daily, over the week here).
+    audit research/health_check.py runs daily, over the week here);
+  * the current system's calibration on everything it has seen resolve,
+    aggregates only (research/calibration.py).
 
 Read-only by construction: everything goes through MetaculusReadClient
 (GET only, raises on any other verb) with the bot's own token. The previous
@@ -37,6 +39,7 @@ from typing import Any, Callable, Iterable
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from research import calibration  # noqa: E402
 from research.metaculus_read_api import MetaculusReadClient, MetaculusReadError  # noqa: E402
 
 BOT_USER_ID = 306913
@@ -252,7 +255,8 @@ def _fmt_prize(standing: dict[str, Any]) -> str:
 
 
 def render(week_start: date, week_end: date, rows: list[dict[str, Any]],
-           previous: dict[str, Any] | None) -> str:
+           previous: dict[str, Any] | None,
+           calibration_summary: dict[str, Any] | None = None) -> str:
     prev = (previous or {}).get("standings", {})
     lines = [f"📊 Bot Metaculus · semana {week_start:%d/%m}–{week_end:%d/%m}", ""]
     for row in rows:
@@ -276,6 +280,8 @@ def render(week_start: date, week_end: date, rows: list[dict[str, Any]],
             unchecked = f" ({cov['unchecked']} sin comprobar)" if cov.get("unchecked") else ""
             lines.append(f"   cobertura 7 días: {cov['closed']} cerradas, "
                          f"{cov['missing']} sin pronóstico{unchecked}")
+    if calibration_summary is not None:
+        lines += [""] + calibration.render(calibration_summary)
     if not previous:
         lines += ["", "(primera semana: sin comparativa todavía)"]
     return "\n".join(lines)
@@ -294,8 +300,14 @@ def coverage(client: MetaculusReadClient, project: str, since: datetime,
     return {"closed": result.closed, "missing": result.missing, "unchecked": result.unchecked}
 
 
-def build(client: MetaculusReadClient, today: date,
-          log: Callable[[str], None] = print) -> tuple[list[dict[str, Any]], date, date]:
+def _resolved_since_new_system(post: dict[str, Any]) -> bool:
+    closed = _parse(post.get("actual_close_time"))
+    return bool(closed and closed >= calibration.NEW_SYSTEM_START
+                and any(q.get("resolution") not in (None, "") for q in _questions(post)))
+
+
+def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] = print
+          ) -> tuple[list[dict[str, Any]], date, date, dict[str, Any] | None]:
     week_end = today - timedelta(days=1)
     week_start = today - timedelta(days=7)
     since = datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)
@@ -304,12 +316,14 @@ def build(client: MetaculusReadClient, today: date,
     log(f"posts_forecasted_by_bot={len(posts)}")
     # The listing carries resolutions but not the bot's own forecasts
     # (my_forecasts is null there); those come only from /posts/<id>/. Fetch
-    # just the posts that can hold a forecast made this week: still open, or
-    # closed since the week began.
+    # just the posts that can hold a forecast made this week (still open, or
+    # closed since the week began) or that the calibration reads (resolved
+    # after the current system started).
     detailed = 0
     for i, post in enumerate(posts):
         closed = _parse(post.get("actual_close_time"))
-        if post.get("status") == "open" or (closed and closed >= since):
+        if (post.get("status") == "open" or (closed and closed >= since)
+                or _resolved_since_new_system(post)):
             try:
                 posts[i] = client.get_json(f"/posts/{post['id']}/")
                 detailed += 1
@@ -334,7 +348,14 @@ def build(client: MetaculusReadClient, today: date,
             f"activity={act} coverage={cov}")
         rows.append({"key": t.key, "label": t.label, "standing": standing, "activity": act,
                      "coverage": cov})
-    return rows, week_start, week_end
+    try:
+        calib = calibration.summarise(q for post in posts for q in _questions(post))
+    except Exception as exc:  # noqa: BLE001 - the rest of the report still goes
+        log(f"calibration_failed reason={type(exc).__name__}")
+        calib = None
+    # Counts only: these logs are public.
+    log(f"calibration binary={calib and calib['binary']} continuous={calib and calib['continuous']}")
+    return rows, week_start, week_end, calib
 
 
 def _shape(value: Any, depth: int = 0) -> Any:
@@ -386,13 +407,13 @@ def main(argv: list[str] | None = None) -> int:
     today = datetime.now(timezone.utc).date()
     if args.dry_run:
         probe(client, today)
-    rows, week_start, week_end = build(client, today)
+    rows, week_start, week_end, calib = build(client, today)
 
     previous = None
     if os.path.exists(args.state):
         with open(args.state, encoding="utf-8") as handle:
             previous = json.load(handle)
-    message = render(week_start, week_end, rows, previous)
+    message = render(week_start, week_end, rows, previous, calib)
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(message + "\n")
     print(message)
