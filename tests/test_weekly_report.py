@@ -183,7 +183,8 @@ class CoverageTests(unittest.TestCase):
         client.get_posts_forecasted_by = lambda user_id: []
         with mock.patch.object(wr, "fetch_standing", return_value=(None, "stub")), \
                 mock.patch.object(wr, "project_id", return_value=None):
-            rows, _start, _end = wr.build(client, self.TODAY, log=lambda _line: None)
+            rows, _start, _end, calib = wr.build(client, self.TODAY, log=lambda _line: None)
+        self.assertEqual((calib["binary"], calib["continuous"]), (0, 0))
         audited = {r["key"] for r in rows if r["coverage"] is not None}
         self.assertEqual(audited, set(wr.COVERAGE_KEYS))
         self.assertEqual(len(client.params), len(wr.COVERAGE_KEYS))
