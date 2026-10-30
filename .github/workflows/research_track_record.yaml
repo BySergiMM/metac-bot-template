@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers"
+        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers; siblings = survey related open questions"
         required: false
         default: "fetch"
         type: choice
-        options: ["fetch", "diagnose", "smoke-test"]
+        options: ["fetch", "diagnose", "smoke-test", "siblings"]
       tournaments:
         description: "Tournaments forming the coverage denominator (space separated)"
         required: false
@@ -232,6 +232,15 @@ jobs:
       # Prints HTTP statuses and JSON key names only, never question content.
       # Exists because guessing which parameter the gateway rejects would cost
       # one push and one workflow run per guess.
+      # Which open FutureEval and Market Pulse questions are siblings, and
+      # whether the bot's forecasts on ladders contradict each other (counts
+      # only; research/siblings_survey.py).
+      - name: Survey sibling questions
+        if: ${{ github.event.inputs.mode == 'siblings' }}
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: python research/siblings_survey.py
+
       - name: Diagnose API access
         if: ${{ github.event.inputs.mode == 'diagnose' }}
         env:
