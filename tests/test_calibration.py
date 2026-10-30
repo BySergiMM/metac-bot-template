@@ -39,6 +39,12 @@ def binary(resolution, p, start=NEW):
             "my_forecasts": {"history": [{"start_time": start, "forecast_values": [1 - p, p]}]}}
 
 
+def multiple_choice(resolution, values, start=NEW):
+    return {"id": 900003, "type": "multiple_choice", "resolution": resolution,
+            "options": ["A", "B", "C"], "actual_close_time": CLOSE,
+            "my_forecasts": {"history": [{"start_time": start, "forecast_values": values}]}}
+
+
 class ScoredForecastTests(unittest.TestCase):
     def test_the_last_forecast_before_the_close_counts(self):
         q = binary("yes", 0.7)
@@ -116,6 +122,17 @@ class SummaryTests(unittest.TestCase):
                                         "binary:no_values:probability_yes,start_time": 1,
                                         "numeric:unreadable_resolution": 1,
                                         "binary:no_history": 1})
+
+    def test_multiple_choice(self):
+        s = cal.summarise([multiple_choice("B", [0.2, 0.5, 0.3]),
+                           multiple_choice("C", [0.6, 0.3, 0.1]),
+                           multiple_choice("D", [0.6, 0.3, 0.1])])
+        self.assertEqual(s["multiple_choice"], 2)
+        self.assertAlmostEqual(s["mc_mean_p"], 0.3)
+        self.assertEqual(s["mc_top"], 1)
+        self.assertEqual(s["skipped"], {"multiple_choice:unreadable_resolution": 1})
+        self.assertIn("   opción múltiple: 2 · prob. media en la que salió 30% · era la favorita 1/2",
+                      cal.render(s))
 
     def test_closed_bounds_add_no_past_bound_mass(self):
         s = cal.summarise([numeric("50", open_lower=False, open_upper=False,

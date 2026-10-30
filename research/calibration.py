@@ -11,6 +11,8 @@ the current system made (from ``NEW_SYSTEM_START``), what those fixes should
 move:
 
 * binary: how many, and the mean Brier score;
+* multiple choice: how many, the mean probability on the option that
+  happened and how often it was the top pick;
 * numeric, discrete and date: how many, the share whose outcome landed inside
   the forecast's 25-75 and 10-90 ranges (ideal 50% and 80%), how many landed
   past the range, and the mean mass the forecast left past its open bounds.
@@ -127,6 +129,8 @@ def cdf_at(cdf: list[float], loc: float) -> float:
 def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Aggregates over resolved questions the current system forecast."""
     briers: list[float] = []
+    mc_probs: list[float] = []
+    mc_top = 0
     n_cont = in_iqr = in_80 = outside = 0
     past_open: list[float] = []
     # Why resolved questions were left out, by type: counts, for the log.
@@ -159,6 +163,14 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         if qtype == "binary" and resolution in ("yes", "no") and len(values) >= 2:
             p = float(values[1])
             briers.append((p - (1.0 if resolution == "yes" else 0.0)) ** 2)
+        elif qtype == "multiple_choice":
+            options = q.get("options") or []
+            if q.get("resolution") not in options or len(values) != len(options):
+                skip(q, "unreadable_resolution")
+                continue
+            p = float(values[options.index(q["resolution"])])
+            mc_probs.append(p)
+            mc_top += p >= max(float(v) for v in values)
         elif qtype in CONTINUOUS and len(values) >= 2:
             loc = location(q)
             if loc is None:
@@ -178,6 +190,9 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return {
         "binary": len(briers),
         "brier": sum(briers) / len(briers) if briers else None,
+        "multiple_choice": len(mc_probs),
+        "mc_mean_p": sum(mc_probs) / len(mc_probs) if mc_probs else None,
+        "mc_top": mc_top,
         "continuous": n_cont,
         "in_iqr": in_iqr,
         "in_80": in_80,
@@ -193,6 +208,10 @@ def render(summary: dict[str, Any]) -> list[str]:
     lines = ["Calibración del sistema actual (desde 10/10, resueltas):"]
     if summary.get("binary"):
         lines.append(f"   binarias: {summary['binary']} · Brier {summary['brier']:.3f}")
+    m = summary.get("multiple_choice") or 0
+    if m:
+        lines.append(f"   opción múltiple: {m} · prob. media en la que salió "
+                     f"{summary['mc_mean_p']:.0%} · era la favorita {summary['mc_top']}/{m}")
     n = summary.get("continuous") or 0
     if n:
         past = summary.get("past_open_bound")
