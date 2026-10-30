@@ -57,6 +57,18 @@ class ScoredForecastTests(unittest.TestCase):
         self.assertIsNone(cal.scored_forecast(q))
 
 
+class TimingTests(unittest.TestCase):
+    def test_a_question_left_out_says_when_its_forecasts_were_made(self):
+        q = binary("yes", 0.7, start=OLD)
+        q["scheduled_close_time"] = CLOSE
+        s = cal.summarise([q])
+        self.assertEqual(s["not_current"], [{
+            "id": 900002, "type": "binary", "records": 1, "first": "2026-10-01T12:00Z",
+            "last": "2026-10-01T12:00Z", "actual_close": "2026-10-25T12:00Z",
+            "scheduled_close": "2026-10-25T12:00Z", "resolved": None}])
+        self.assertNotIn("0.7", str(s["not_current"]))
+
+
 class LocationTests(unittest.TestCase):
     def test_linear_log_and_out_of_range(self):
         self.assertAlmostEqual(cal.location(numeric("25")), 0.25)

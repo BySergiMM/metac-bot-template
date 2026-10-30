@@ -65,6 +65,25 @@ def scored_forecast(question: dict[str, Any]) -> dict[str, Any] | None:
     return best
 
 
+def timing(question: dict[str, Any]) -> dict[str, Any]:
+    """When the bot's forecasts on ``question`` started, against its close
+    and the cutoff: timestamps only, so it can go to the public log to say
+    why a question was not counted."""
+    history = ((question.get("my_forecasts") or {}).get("history")) or []
+    starts = sorted(s for s in (_parse(r.get("start_time")) for r in history
+                                if isinstance(r, dict)) if s is not None)
+
+    def iso(when: datetime | None) -> str | None:
+        return when.strftime("%Y-%m-%dT%H:%MZ") if when else None
+
+    return {"id": question.get("id"), "type": question.get("type"), "records": len(history),
+            "first": iso(starts[0] if starts else None),
+            "last": iso(starts[-1] if starts else None),
+            "actual_close": iso(_parse(question.get("actual_close_time"))),
+            "scheduled_close": iso(_parse(question.get("scheduled_close_time"))),
+            "resolved": iso(_parse(question.get("actual_resolve_time")))}
+
+
 def location(question: dict[str, Any]) -> float | None:
     """Where the resolution sits on the question's [0, 1] axis (below 0 or
     above 1 when past a bound), or None when it cannot be read safely."""
@@ -112,6 +131,9 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
     past_open: list[float] = []
     # Why resolved questions were left out, by type: counts, for the log.
     skipped: dict[str, int] = {}
+    # When the forecasts of the ones the current system did not make were
+    # made: timestamps only, to tell an old-system forecast from a clock bug.
+    not_current: list[dict[str, Any]] = []
 
     def skip(q: dict[str, Any], reason: str) -> None:
         key = f"{q.get('type')}:{reason}"
@@ -127,6 +149,7 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         forecast = scored_forecast(q)
         if forecast is None:
             skip(q, "not_current_system")
+            not_current.append(timing(q))
             continue
         values = forecast.get("forecast_values")
         if not isinstance(values, list) or not values:
@@ -161,6 +184,7 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "outside": outside,
         "past_open_bound": sum(past_open) / len(past_open) if past_open else None,
         "skipped": skipped,
+        "not_current": not_current,
     }
 
 
