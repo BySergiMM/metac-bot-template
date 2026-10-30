@@ -109,10 +109,16 @@ jobs:
           # module scope and therefore cannot be collected without it.
           BLOCKED_MODULES = {
               "tests.test_asknews_research",
+              "tests.test_cp_pool",
               "tests.test_discovery",
               "tests.test_model_prices",
+              "tests.test_numeric_shape",
               "tests.test_pipeline_hostile_model",
+              "tests.test_prompt_wiring",
               "tests.test_publication",
+              "tests.test_second_research",
+              # Imports cleanly, but loads main.py (and so the SDK) in setUpClass.
+              "tests.test_uncaught_redaction",
           }
           # Individual methods in an otherwise dependency-free module that
           # reach for the real forecasting_tools client inside the test body.
@@ -172,11 +178,14 @@ jobs:
                 "installed instead):".format(len(skipped)))
           for test_id in sorted(skipped):
               print("  - " + test_id)
-          unexpected = len(skipped) - (len(BLOCKED_MODULES) + len(BLOCKED_TESTS))
-          if unexpected:
-              print("::error::skipped {0} more test(s) than the {1} named "
-                    "above expect; the exclude list is stale".format(
-                        len(skipped), len(BLOCKED_MODULES) + len(BLOCKED_TESTS)))
+          # Stale entries: a module or test named above that skipped nothing.
+          stale = sorted(
+              [m for m in BLOCKED_MODULES
+               if not any(t == m or t.endswith("." + m) or t.startswith(m + ".") for t in skipped)]
+              + [t for t in BLOCKED_TESTS if t not in skipped])
+          if stale:
+              print("::error::the exclude list is stale; these skip nothing: "
+                    + ", ".join(stale))
               sys.exit(1)
 
           assert not real_forecasting_tools_is_loaded(), (
