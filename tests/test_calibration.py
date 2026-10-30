@@ -95,6 +95,16 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(s["outside"], 1)
         self.assertAlmostEqual(s["past_open_bound"], 0.02)
 
+    def test_left_out_questions_are_counted_by_reason(self):
+        no_values = binary("yes", 0.7)
+        no_values["my_forecasts"]["history"][0] = {"start_time": NEW, "probability_yes": 0.7}
+        s = cal.summarise([binary("yes", 0.7, start=OLD), no_values, numeric("n/a"),
+                           {"type": "binary", "resolution": "yes", "my_forecasts": None}])
+        self.assertEqual(s["skipped"], {"binary:not_current_system": 1,
+                                        "binary:no_values:probability_yes,start_time": 1,
+                                        "numeric:unreadable_resolution": 1,
+                                        "binary:no_history": 1})
+
     def test_closed_bounds_add_no_past_bound_mass(self):
         s = cal.summarise([numeric("50", open_lower=False, open_upper=False,
                                    cdf=uniform_cdf(below=0.0, above=0.0))])
