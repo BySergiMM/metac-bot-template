@@ -568,6 +568,26 @@ def after_run(now: datetime | None = None, send=_send) -> bool:
     return changed
 
 
+def merge(path: str, other: str) -> tuple[int, int]:
+    """Add the lines of the ledger at ``other`` that the one at ``path``
+    lacks, keeping one history start (the earliest), in time order: how a
+    history lost to a failed cache restore is put back
+    (repair_spend_ledger.yaml). Returns (lines before, lines after)."""
+    mine, theirs = load(path), load(other)
+    seen, merged = set(), []
+    for line in mine + theirs:
+        key = json.dumps(line, sort_keys=True)
+        if key not in seen and line.get("kind") != "start":
+            seen.add(key)
+            merged.append(line)
+    starts = [_when(l) for l in mine + theirs if l.get("kind") == "start"]
+    if starts:
+        merged.append({"t": min(starts).isoformat(timespec="seconds"), "kind": "start"})
+    merged.sort(key=lambda l: (_when(l), l.get("kind") != "start"))
+    _rewrite(path, merged)
+    return len(mine), len(merged)
+
+
 def breakdown(lines: list[dict]) -> str:
     """Calls, tokens and dollars per provider, phase and model -- for Test
     Bot's log, where the question is whether every path is recorded -- then
@@ -604,8 +624,11 @@ def main(argv: list[str]) -> int:
             print(weekly_message(load(), datetime.now(timezone.utc)))
         elif command == "breakdown":
             print(breakdown(load()))
+        elif command == "merge" and len(argv) > 2:
+            before, after = merge(ledger_path() or "spend_ledger.jsonl", argv[2])
+            print(f"spend_merge lines_before={before} lines_after={after}")
         else:
-            print("usage: python spend.py after-run|weekly|breakdown", file=sys.stderr)
+            print("usage: python spend.py after-run|weekly|breakdown|merge OTHER", file=sys.stderr)
             return 2
     except Exception as exc:  # noqa: BLE001 - never fail the job
         logger.warning("spend_%s_failed reason=%s", command or "cli", type(exc).__name__)

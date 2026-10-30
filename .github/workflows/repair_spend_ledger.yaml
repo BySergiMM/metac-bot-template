@@ -1,0 +1,97 @@
+name: Repair the spend ledger
+
+# Puts back a spend history lost to a failed cache restore. On 2026-10-30 a
+# run of run_bot_on_tournament.yaml could not restore the ledger ("Egress is
+# over the account limit"), saved one holding only itself, and every later
+# run restored that. The older ledger was still in the cache under its own
+# key (Actions -> Caches, or `gh cache list`): give that key here. This
+# restores it and the newest ledger, merges them (spend.py merge: every line
+# once, the earliest history start) and saves the result as the newest, so
+# the next bot run carries the whole history again.
+#
+# With "seed" ticked and the cache holding no ledger at all, it saves a new
+# empty history instead: the bot saves only on top of a restored ledger, so
+# that is how a history is started again.
+#
+# Reads and writes the Actions cache only; no secrets, no Metaculus, no
+# WhatsApp.
+
+on:
+  workflow_dispatch:
+    inputs:
+      older_key:
+        description: "Cache key of the older ledger to merge in (e.g. spend-ledger-41048504435-1)"
+        required: false
+        default: ""
+        type: string
+      seed:
+        description: "Start a new empty history if no ledger is restored (only when the cache holds none)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spend-ledger-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SPEND_LEDGER_PATH: spend_ledger.jsonl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The cache version includes the path, so both ledgers restore to
+      # spend_ledger.jsonl: the older one first, moved aside.
+      - name: Restore the older ledger
+        id: older
+        if: ${{ inputs.older_key != '' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: spend_ledger.jsonl
+          key: ${{ inputs.older_key }}
+          fail-on-cache-miss: true
+
+      - name: Move it aside
+        if: ${{ inputs.older_key != '' }}
+        run: mv spend_ledger.jsonl older_ledger.jsonl
+
+      - name: Restore the newest ledger
+        id: newest
+        uses: actions/cache/restore@v4
+        with:
+          path: spend_ledger.jsonl
+          key: spend-ledger-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            spend-ledger-
+
+      # A failed restore looks like an empty cache. Never save over the
+      # history on one: stop, unless seeding was asked for.
+      - name: Check the newest ledger came back
+        if: ${{ steps.newest.outputs.cache-matched-key == '' }}
+        run: |
+          echo "No ledger restored: none in the cache, or the restore failed."
+          if [ "${{ inputs.seed }}" != "true" ]; then
+            echo "Run again later, or tick seed if the cache really holds none." >&2
+            exit 1
+          fi
+          touch spend_ledger.jsonl
+
+      - name: Merge
+        if: ${{ inputs.older_key != '' }}
+        run: python spend.py merge older_ledger.jsonl
+
+      - name: Save as the newest ledger
+        uses: actions/cache/save@v4
+        with:
+          path: spend_ledger.jsonl
+          key: spend-ledger-repair-${{ github.run_id }}-${{ github.run_attempt }}

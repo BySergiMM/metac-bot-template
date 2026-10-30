@@ -281,6 +281,24 @@ class BudgetTests(LedgerCase):
             self.assertEqual(spend.thresholds(), spend.DEFAULT_THRESHOLDS)
 
 
+class MergeTests(LedgerCase):
+    def test_a_lost_history_is_merged_back_once(self):
+        old_start = {"t": (NOW - timedelta(days=30)).isoformat(timespec="seconds"), "kind": "start"}
+        a, b = call(NOW - timedelta(days=10), 5.0, run="r1"), call(NOW - timedelta(days=2), 3.0, run="r2")
+        new = call(NOW - timedelta(hours=1), 1.0, run="r3")
+        other = os.path.join(self.dir.name, "older.jsonl")
+        with open(other, "w", encoding="utf-8") as handle:
+            for line in (old_start, a, b):
+                handle.write(json.dumps(line) + "\n")
+        self.write({"t": (NOW - timedelta(hours=2)).isoformat(timespec="seconds"), "kind": "start"}, b, new)
+        self.assertEqual(spend.merge(spend.ledger_path(), other), (3, 4))
+        lines = spend.load()
+        self.assertEqual([l.get("kind") for l in lines], ["start", None, None, None])
+        self.assertEqual(lines[0]["t"], old_start["t"])
+        self.assertEqual([l.get("run") for l in lines[1:]], ["r1", "r2", "r3"])
+        self.assertEqual(spend.history_start(lines), datetime.fromisoformat(old_start["t"]))
+
+
 class AfterRunTests(LedgerCase):
     def after(self, now=NOW, ok=True):
         sent = []
@@ -486,6 +504,22 @@ class WiringTests(unittest.TestCase):
         for index in (restore, after, save):
             self.assertTrue(job["steps"][index].get("continue-on-error"), names[index])
         self.assertEqual(job["steps"][save]["with"]["key"], job["steps"][restore]["with"]["key"])
+        # Never saved over a failed restore (the 2026-10-30 reset).
+        self.assertEqual(job["steps"][restore]["id"], "ledger")
+        self.assertIn("steps.ledger.outputs.cache-matched-key != ''", job["steps"][save]["if"])
+
+    def test_the_repair_merges_an_older_ledger_into_the_newest(self):
+        import yaml
+
+        flow = yaml.safe_load(self.read(".github", "workflows", "repair_spend_ledger.yaml"))
+        steps = flow["jobs"]["repair"]["steps"]
+        names = [s.get("name") for s in steps]
+        self.assertLess(names.index("Restore the older ledger"), names.index("Restore the newest ledger"))
+        self.assertIn("python spend.py merge older_ledger.jsonl",
+                      steps[names.index("Merge")]["run"])
+        saved = steps[names.index("Save as the newest ledger")]["with"]
+        self.assertTrue(saved["key"].startswith("spend-ledger-"))
+        self.assertNotIn("secrets.", self.read(".github", "workflows", "repair_spend_ledger.yaml"))
 
     def test_the_weekly_report_reads_but_never_saves_the_ledger(self):
         import yaml

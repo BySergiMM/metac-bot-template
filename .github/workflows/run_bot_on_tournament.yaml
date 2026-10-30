@@ -115,6 +115,7 @@ jobs:
       # contents: read. A miss starts a new history; the messages then say
       # from which day the month is counted.
       - name: Restore the spend ledger
+        id: ledger
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
@@ -418,9 +419,15 @@ jobs:
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           CALLMEBOT_PHONE_NUMBER: ${{ secrets.CALLMEBOT_PHONE_NUMBER }}
       # Saved only when something was recorded (most runs find nothing to
-      # forecast), or when the step above could not tell.
+      # forecast), or when the step above could not tell -- and only on top
+      # of a restored ledger. On 2026-10-30 a restore failed ("Egress is over
+      # the account limit"), the run saved a ledger holding only itself, and
+      # every later run restored that one: a month of history gone from the
+      # budget and the throttle. A run whose restore fails loses its own few
+      # lines instead. repair_spend_ledger.yaml merges an older ledger back,
+      # or seeds a new one if the cache ever holds none.
       - name: Save the spend ledger
-        if: ${{ !cancelled() && steps.spend.outputs.changed != 'false' && hashFiles('spend_ledger.jsonl') != '' }}
+        if: ${{ !cancelled() && steps.ledger.outputs.cache-matched-key != '' && steps.spend.outputs.changed != 'false' && hashFiles('spend_ledger.jsonl') != '' }}
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
