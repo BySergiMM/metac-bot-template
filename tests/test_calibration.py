@@ -134,6 +134,11 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("   opción múltiple: 2 · prob. media en la que salió 30% · era la favorita 1/2",
                       cal.render(s))
 
+    def test_an_unhandled_shape_is_counted_not_dropped(self):
+        q = binary("yes", 0.7)
+        q["my_forecasts"]["history"][0]["forecast_values"] = [0.7]
+        self.assertEqual(cal.summarise([q])["skipped"], {"binary:unhandled:yes:1": 1})
+
     def test_closed_bounds_add_no_past_bound_mass(self):
         s = cal.summarise([numeric("50", open_lower=False, open_upper=False,
                                    cdf=uniform_cdf(below=0.0, above=0.0))])

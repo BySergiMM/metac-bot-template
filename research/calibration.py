@@ -187,6 +187,8 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 past_open.append(float(values[0]))
             if q.get("open_upper_bound"):
                 past_open.append(1.0 - float(values[-1]))
+        else:
+            skip(q, f"unhandled:{resolution if qtype == 'binary' else 'values'}:{len(values)}")
     return {
         "binary": len(briers),
         "brier": sum(briers) / len(briers) if briers else None,
