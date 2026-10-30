@@ -384,6 +384,102 @@ def own_community(question: Any, fetch: Fetch, now: datetime | None = None) -> s
             "this is one input to weigh, not an answer to copy.")
 
 
+# ------------------------------------------------------------ group siblings
+
+MONTH_WORD = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", re.I)
+MAX_SIBLINGS = 12
+
+
+def _cdf_quantile(cdf: list[float], p: float) -> float:
+    """Where a 201-point CDF crosses ``p``, on the 0-1 axis (linear between
+    points; the ends when the CDF never crosses inside the range)."""
+    for i in range(1, len(cdf)):
+        a, b = float(cdf[i - 1]), float(cdf[i])
+        if b >= p:
+            frac = 0.0 if b == a else (p - a) / (b - a)
+            return (i - 1 + max(0.0, min(1.0, frac))) / (len(cdf) - 1)
+    return 1.0
+
+
+def _standing(sub: dict) -> str | None:
+    """The bot's latest forecast on a sibling, in its own units."""
+    latest = ((sub.get("my_forecasts") or {}).get("latest")) or {}
+    values = latest.get("forecast_values")
+    if not isinstance(values, list) or not values:
+        return None
+    if sub.get("type") == "binary" and len(values) == 2:
+        return f"{float(values[1]):.0%}"
+    if sub.get("type") in ("numeric", "discrete", "date") and len(values) > 2:
+        points = [_real_units(sub, _cdf_quantile(values, p)) for p in (0.1, 0.5, 0.9)]
+        if any(x is None for x in points):
+            return None
+        low, mid, high = (_shown_value(sub, x) for x in points)
+        return f"median {mid} (10-90: {low} to {high})"
+    return None
+
+
+def _resolved(sub: dict) -> str | None:
+    raw = str(sub.get("resolution") or "").strip()
+    if not raw or raw.lower() in ("annulled", "ambiguous"):
+        return None
+    if raw in ("above_upper_bound", "below_lower_bound"):
+        return raw.replace("_", " ")
+    if sub.get("type") in ("numeric", "discrete"):
+        try:
+            return _shown_value(sub, float(raw))
+        except ValueError:
+            return raw
+    return raw
+
+
+def group_siblings(question: Any, fetch: Fetch) -> str:
+    """The other questions of this question's group, from the post the SDK
+    unpacked it from (no extra request): what has resolved, and, in a series
+    over periods, the bot's standing forecasts on the others.
+
+    futuresearch reconciles each forecast with related questions ("world
+    modeling", about 0.005 Brier where it acts). Every open Market Pulse post
+    was a group on 2026-10-31, most of them one quantity over biweekly
+    periods (the 10-year yield, the VIX, spreads, return differences): each
+    period was forecast alone, blind to the periods already resolved and to
+    what the bot said about the next one. Company groups (revenue, EPS) show
+    only what has resolved; the other companies' forecasts would be noise.
+    """
+    api = getattr(question, "api_json", None) or {}
+    group = api.get("group_of_questions") if isinstance(api, dict) else None
+    subs = [q for q in ((group or {}).get("questions") or []) if isinstance(q, dict)]
+    own = getattr(question, "id_of_question", None)
+    others = [q for q in subs if q.get("id") != own]
+    if not others:
+        return ""
+    series = sum(bool(MONTH_WORD.search(str(q.get("label") or ""))) for q in subs) >= len(subs) / 2
+    others.sort(key=lambda q: str(q.get("scheduled_resolve_time") or q.get("scheduled_close_time") or ""))
+    lines = []
+    for sub in others:
+        label = str(sub.get("label") or sub.get("title") or "")[:60]
+        resolved = _resolved(sub)
+        if resolved is not None:
+            lines.append(f"- {label}: resolved {resolved}")
+            continue
+        if not series:
+            continue
+        closes = str(sub.get("scheduled_close_time") or "")[:10]
+        when = f"{sub.get('status') or 'open'}, closes {closes}" if closes else str(sub.get("status") or "open")
+        standing = _standing(sub)
+        if standing:
+            lines.append(f"- {label} ({when}): your standing forecast {standing}")
+        elif isinstance(sub.get("my_forecasts"), dict):
+            lines.append(f"- {label} ({when}): not forecast yet")
+        else:  # the listing did not say: claim nothing about our forecast
+            lines.append(f"- {label} ({when})")
+    if not lines:
+        return ""
+    note = ("Resolved values are facts. Your standing forecasts on the other periods are for "
+            "consistency: let any difference from them come from the different period and "
+            "what is known about it, not from noise.") if series else "Resolved values are facts."
+    return "\n".join(lines[:MAX_SIBLINGS] + [note])
+
+
 def eps_gaap(question: Any, fetch: Fetch) -> str:
     """GAAP diluted EPS history against the analyst consensus; see market_quant.
 
@@ -624,6 +720,7 @@ SECTIONS = (
     ("Metaculus community forecast on this question (revealed; an input, not an answer)",
      own_community),
     ("Linked Metaculus questions", metaculus_links),
+    ("Other questions in this question's group", group_siblings),
     ("Current crypto prices", crypto_prices),
     ("Current stock/index prices", stock_prices),
     ("GAAP diluted EPS against the analyst consensus (this question resolves on GAAP)", eps_gaap),
