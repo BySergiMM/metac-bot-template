@@ -330,6 +330,12 @@ def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] =
             except MetaculusReadError:
                 pass
     log(f"posts_detailed={detailed}")
+    # Which posts the calibration can read, and the resolved ones it cannot
+    # because the listing gives no close time: post ids only (public).
+    calibrated = sorted(p["id"] for p in posts if _resolved_since_new_system(p))
+    no_close = sorted(p.get("id") for p in posts if not _parse(p.get("actual_close_time"))
+                      and any(q.get("resolution") not in (None, "") for q in _questions(p)))
+    log(f"calibration_posts n={len(calibrated)} ids={calibrated} resolved_without_close={no_close}")
     rows = []
     for t in targets(today):
         standing, note = fetch_standing(client, t.project)
