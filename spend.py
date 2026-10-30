@@ -412,6 +412,32 @@ def over_budget(now: datetime | None = None) -> bool:
         return False
 
 
+#: The share of the budget the cycle's projected spend must stay under for
+#: optional spending (main.py's second research pass) to run.
+EXTRAS_MAX_SHARE = 0.8
+
+
+def room_for_extras(now: datetime | None = None) -> bool:
+    """True while both this cycle's Claude spend and its projection to the
+    cycle's end stay under EXTRAS_MAX_SHARE of the budget. The extras then
+    stop on their own once they push the pace up. False without a history,
+    before a day of data and on any error: the extras go first."""
+    try:
+        now = now or datetime.now(timezone.utc)
+        lines = load()
+        spent = month_spend(lines, now)
+        cap = budget_usd(now) * EXTRAS_MAX_SHARE
+        # No history (a failed cache restore) reads as no spend: the
+        # 2026-10-30 reset. Then there is no room.
+        if history_start(lines) is None:
+            return False
+        pace = projection(spent, now, counted_since(lines, now))
+        return spent < cap and pace is not None and pace < cap
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("extras", exc)
+        return False
+
+
 ############################## MESSAGES ##############################
 
 def money(x: float) -> str:

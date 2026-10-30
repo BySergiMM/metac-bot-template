@@ -79,6 +79,10 @@ jobs:
       # research everywhere (spend.boost_active). Both repository variables.
       CLAUDE_BUDGET_CYCLE_DAY: ${{ vars.CLAUDE_BUDGET_CYCLE_DAY || '1' }}
       RESEARCH_BOOST_UNTIL: ${{ vars.RESEARCH_BOOST_UNTIL || '' }}
+      # The second, independent research pass on FutureEval and Market Pulse
+      # (main.py, second_research): "off" stops it. It also stops by itself
+      # while the cycle's projected Claude spend is over 80% of the budget.
+      SECOND_RESEARCH: ${{ vars.SECOND_RESEARCH || 'on' }}
       # Market Pulse earnings dossiers (mp_dossier.py), restored from the
       # Actions cache below; only Market Pulse questions read them.
       MP_DOSSIERS_PATH: mp_dossiers.json
