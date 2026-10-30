@@ -490,6 +490,7 @@ class SummerTemplateBot2026(ForecastBot):
             (c) A brief description of a scenario that results in a No outcome.
             (d) A brief description of a scenario that results in a Yes outcome.
             (e) Pre-mortem: assume your forecast turns out badly wrong. What is the most likely reason? Adjust if that reason is more plausible than you first allowed.
+            (f) Four checks, one line each: does your reasoning cover the smallest event the criteria would count as Yes, not only the dramatic version? Did the conditions behind your base rate change since the cases it comes from? Where an actor's stated intention matters, what is their record of following through and what do their incentives favour? Does your number say what your analysis says, rather than retreating towards 50% or the prior?
             Then move from the base rate in (a0) only as far as the specific evidence justifies.
 
             You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.

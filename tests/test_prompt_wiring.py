@@ -305,6 +305,20 @@ class AlreadyDeterminedWordingTests(unittest.TestCase):
         self.assertIn("never assume an outcome without a dated, primary source showing it",
                       prompt)
 
+    def test_the_binary_prompt_checks_the_failure_modes_futuresearch_found(self):
+        # Catastrophizing, a base rate from changed conditions, rhetoric
+        # taken for commitment, underconfidence (futuresearch, May 2026).
+        bot = make_bot()
+        llm = FakeLlm("Probability: 50%")
+        bot.llm = llm
+        run(bot._run_forecast_on_binary(binary(), "research"))
+        prompt = llm.prompts[0]
+        for words in ("the smallest event the criteria would count as Yes",
+                      "Did the conditions behind your base rate change",
+                      "record of following through", "rather than retreating towards 50%"):
+            self.assertIn(words, prompt)
+        self.assertLess(prompt.index("(e) Pre-mortem"), prompt.index("(f) Four checks"))
+
 
 if __name__ == "__main__":
     unittest.main()
