@@ -431,6 +431,57 @@ class BuildTests(unittest.TestCase):
         self.assertIn("asyncio.to_thread(live_context.build, question)", body)
 
 
+class GroupSiblingTests(unittest.TestCase):
+    """The other questions of a group, read from the post the SDK unpacked
+    the question from. Synthetic numbers."""
+
+    @staticmethod
+    def sub(qid, label, close, resolution=None, latest=None, status="open", my=True):
+        q = {"id": qid, "label": label, "type": "numeric", "status": status,
+             "scheduled_close_time": close + "T00:00:00Z", "scheduled_resolve_time": close + "T12:00:00Z",
+             "scaling": {"range_min": 3.0, "range_max": 5.0, "zero_point": None}, "unit": "%",
+             "resolution": resolution}
+        if my:
+            q["my_forecasts"] = {"latest": {"forecast_values": latest} if latest else None}
+        return q
+
+    def question(self, subs, own=2):
+        return Q(question_text="What will be the ending value of the UST 10Y Yield?",
+                 id_of_question=own, api_json={"group_of_questions": {"questions": subs}})
+
+    def test_a_series_shows_resolved_periods_and_standing_forecasts_in_order(self):
+        linear = [i / 200 for i in range(201)]
+        subs = [self.sub(3, "Nov 9 - Nov 20", "2026-11-20", latest=linear),
+                self.sub(1, "Oct 12 - Oct 23", "2026-10-23", resolution="4.12", status="resolved"),
+                self.sub(2, "Oct 26 - Nov 6", "2026-11-06"),
+                self.sub(4, "Nov 23 - Dec 4", "2026-12-04", status="upcoming")]
+        out = lc.group_siblings(self.question(subs), FakeWeb({}))
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "- Oct 12 - Oct 23: resolved 4.12 %")
+        self.assertEqual(lines[1], "- Nov 9 - Nov 20 (open, closes 2026-11-20): your standing forecast "
+                                   "median 4 % (10-90: 3.2 % to 4.8 %)")
+        self.assertEqual(lines[2], "- Nov 23 - Dec 4 (upcoming, closes 2026-12-04): not forecast yet")
+        self.assertNotIn("Oct 26 - Nov 6", out)   # the question itself
+        self.assertIn("for consistency", lines[-1])
+
+    def test_a_company_group_shows_only_what_resolved(self):
+        subs = [self.sub(1, "Nvidia", "2026-11-20", resolution="57000", status="resolved"),
+                self.sub(2, "Meta", "2026-10-30"),
+                self.sub(3, "Tesla", "2026-10-22", latest=[i / 200 for i in range(201)])]
+        out = lc.group_siblings(self.question(subs), FakeWeb({}))
+        self.assertEqual(out.splitlines(), ["- Nvidia: resolved 57,000 %", "Resolved values are facts."])
+
+    def test_no_claim_about_our_forecast_when_the_listing_does_not_say(self):
+        subs = [self.sub(1, "Oct 12 - Oct 23", "2026-10-23", my=False),
+                self.sub(2, "Oct 26 - Nov 6", "2026-11-06")]
+        out = lc.group_siblings(self.question(subs), FakeWeb({}))
+        self.assertTrue(out.startswith("- Oct 12 - Oct 23 (open, closes 2026-10-23)\n"))
+
+    def test_a_single_question_has_no_siblings(self):
+        self.assertEqual(lc.group_siblings(q("Will it rain?"), FakeWeb({})), "")
+        self.assertEqual(lc.group_siblings(Q(api_json={"question": {}}, id_of_question=1), FakeWeb({})), "")
+
+
 class OwnCommunityTests(unittest.TestCase):
     """The revealed community forecast on the question itself, as data for
     the prompt (Metaculus' advice, 2026-10-26: use it, never copy it, and
