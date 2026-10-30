@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Literal
@@ -367,6 +368,45 @@ class SummerTemplateBot2026(ForecastBot):
         with spend.phase("research"):
             return await self._run_research(question)
 
+    #: The second, independent research pass (2026-10-30). Our five
+    #: forecasters all read one rundown, so a fact it missed is missed by
+    #: all of them; futuresearch's ensemble members each research on their
+    #: own, and "different agent runs explore different search paths" (its
+    #: COP30 case: one run found the deciding link, the other never searched
+    #: for it). This pass searches at the same time as the main one, without
+    #: seeing it, for what would decide the question; both reach every
+    #: forecaster. Light depth (6 searches, about $0.07), FutureEval and
+    #: Market Pulse only, and only while spend.room_for_extras().
+    second_research = False
+    SECOND_ANGLE = (
+        "A colleague is writing the general rundown on this question; work on your own. "
+        "Look only for the facts that would decide it: (1) the latest value or status "
+        "the resolution source itself publishes, and its recent history; (2) any sign "
+        "the outcome has already happened, been ruled out, scheduled or blocked; (3) the "
+        "strongest dated evidence for the outcome the status quo does not favour. "
+        "Report what you find, dated and sourced, and say plainly what you could not find."
+    )
+
+    async def _claude_research(self, prompt: str) -> str:
+        """The main rundown, plus the second pass when it is on (see
+        ``second_research``). The second pass failing costs only itself."""
+        if not (self.second_research and self.research_depth == "full"):
+            return await claude_research.research(prompt, depth=self.research_depth)
+        main, second = await asyncio.gather(
+            claude_research.research(prompt, depth=self.research_depth),
+            claude_research.research(f"{self.SECOND_ANGLE}\n\n{prompt}", depth="light"),
+            return_exceptions=True,
+        )
+        if isinstance(main, BaseException):
+            raise main
+        if isinstance(second, BaseException) or not str(second or "").strip():
+            logger.warning("second_research_failed reason=%s",
+                           type(second).__name__ if isinstance(second, BaseException) else "empty")
+            return main
+        logger.info("second_research added=1")
+        return (f"{main}\n\n## Second, independent research pass "
+                f"(searched separately for the facts that would decide the question)\n{second}")
+
     async def _run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             research = ""
@@ -401,9 +441,7 @@ class SummerTemplateBot2026(ForecastBot):
             # this question, never the forecast. See claude_research.
             if claude_research.enabled():
                 try:
-                    research = await claude_research.research(
-                        prompt, depth=self.research_depth
-                    )
+                    research = await self._claude_research(prompt)
                 except Exception as exc:  # noqa: BLE001 - fall back, never fail
                     logger.warning(
                         "claude_research_failed reason=%s falling_back=true",
@@ -1210,9 +1248,17 @@ if __name__ == "__main__":
     # Dispatch on mode. Each branch produces a list of ForecastReport (or
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
+    # The second research pass, for the prize tournaments only, while the
+    # cycle's projected Claude spend leaves room (spend.room_for_extras) and
+    # the SECOND_RESEARCH variable is not "off".
+    second_research = (prize_depth == "full" and os.getenv("SECOND_RESEARCH", "on") != "off"
+                       and spend.room_for_extras())
+    logger.info("second_research enabled=%d", int(second_research))
+
     if run_mode == "tournament":
         spend.set_tournament("futureeval")
         template_bot.research_depth = prize_depth
+        template_bot.second_research = second_research
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.FUTUREEVAL.id, return_exceptions=True
@@ -1220,6 +1266,7 @@ if __name__ == "__main__":
         )
         spend.set_tournament("minibench")
         template_bot.research_depth = other_depth
+        template_bot.second_research = False
         minibench_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.MINIBENCH.id, return_exceptions=True
@@ -1257,6 +1304,7 @@ if __name__ == "__main__":
         # own skip is lifted for this mode only.
         template_bot.skip_previously_forecasted_questions = False
         spend.set_tournament("market_pulse")
+        template_bot.second_research = second_research
         # The final forecast pooled with the revealed human community
         # prediction (cp_pool.py), at the weight in MP_CP_POOL_WEIGHT; unset
         # or 0 leaves it off.
