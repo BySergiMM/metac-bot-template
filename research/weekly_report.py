@@ -356,6 +356,8 @@ def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] =
     # Counts only: these logs are public.
     log(f"calibration binary={calib and calib['binary']} continuous={calib and calib['continuous']}"
         f" skipped={calib and calib['skipped']}")
+    for t in (calib or {}).get("not_current") or []:
+        log("calibration_not_current " + " ".join(f"{k}={v}" for k, v in t.items()))
     return rows, week_start, week_end, calib
 
 
