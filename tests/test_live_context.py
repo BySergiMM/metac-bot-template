@@ -42,7 +42,40 @@ YAHOO = {"chart": {"result": [{"meta": {"currency": "USD"},
                                "indicators": {"quote": [{"close": [300.0, None, 320.5, 310.25]}]}}]}}
 
 
+def yahoo_series(n, start=100.0, step=0.01):
+    """n closes alternating +step/-step in log terms: daily s.d. about step."""
+    import math
+    closes = [start]
+    for i in range(n - 1):
+        closes.append(closes[-1] * math.exp(step if i % 2 == 0 else -step))
+    return {"chart": {"result": [{"meta": {"currency": "USD"},
+                                   "indicators": {"quote": [{"close": closes}]}}]}}
+
+
 class PriceTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 30, 15, tzinfo=timezone.utc)  # a Friday
+
+    def test_volatility_and_the_move_to_the_resolution_date(self):
+        web = FakeWeb({"https://query1.finance.yahoo.com/v8/finance/chart/AAPL": yahoo_series(61)})
+        question = q("What will Apple's (AAPL) stock close at?")
+        question.scheduled_resolution_time = datetime(2026, 11, 13, 21, tzinfo=timezone.utc)
+        out = lc.stock_prices(question, web, now=self.NOW)
+        self.assertIn("daily s.d. 1.0% over the last 60 sessions", out)
+        # Two weeks of weekdays after a Friday: 10 sessions, 1% x sqrt(10).
+        self.assertIn("10 sessions to 2026-11-13: 1 s.d. move ±3.2%", out)
+        self.assertIn("?range=3mo&interval=1d", web.calls[0][0])
+
+    def test_no_move_without_a_future_date_and_no_s_d_on_a_short_series(self):
+        web = FakeWeb({"https://query1.finance.yahoo.com/v8/finance/chart/AAPL": yahoo_series(61)})
+        out = lc.stock_prices(q("What will Apple's (AAPL) stock close at?"), web, now=self.NOW)
+        self.assertIn("daily s.d. 1.0%", out)
+        self.assertNotIn("sessions to", out)
+        past = q("What will Apple's (AAPL) stock close at?")
+        past.scheduled_resolution_time = datetime(2026, 10, 30, 21, tzinfo=timezone.utc)
+        self.assertNotIn("sessions to", lc.stock_prices(past, web, now=self.NOW))
+        short = FakeWeb({"https://query1.finance.yahoo.com/v8/finance/chart/AAPL": YAHOO})
+        self.assertNotIn("s.d.", lc.stock_prices(q("What will Apple's (AAPL) stock close at?"), short))
+
     def test_stock_ticker_in_a_price_question(self):
         web = FakeWeb({"https://query1.finance.yahoo.com/v8/finance/chart/AAPL": YAHOO})
         out = lc.stock_prices(q("What will Apple's (AAPL) stock close at?"), web)

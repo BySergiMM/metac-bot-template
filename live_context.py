@@ -43,11 +43,12 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 import re
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import market_quant
@@ -236,7 +237,46 @@ def _asks_a_price(question: Any) -> bool:
     return bool(PRICE_WORDS.search(text))
 
 
-def stock_prices(question: Any, fetch: Fetch) -> str:
+#: Daily closes behind the volatility line: about three months of sessions.
+VOL_MIN_RETURNS = 20
+
+
+def _sessions_until(question: Any, now: datetime) -> tuple[int, str] | None:
+    """Weekday sessions after today up to the question's scheduled resolution
+    (its close when that is missing), and that date; None when it is past."""
+    when = getattr(question, "scheduled_resolution_time", None) or getattr(
+        question, "close_time", None)
+    if not isinstance(when, datetime):
+        return None
+    when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    days = (when.date() - now.date()).days
+    if days < 1:
+        return None
+    sessions = sum(1 for d in range(1, days + 1)
+                   if (now.date() + timedelta(days=d)).weekday() < 5)
+    return (sessions, when.date().isoformat()) if sessions else None
+
+
+def _volatility(closes: list[float], question: Any, now: datetime) -> str:
+    """The typical move to the resolution date from the daily log returns:
+    futuresearch sizes its numeric ranges this way, and five forecasters
+    given only the price came out 2-3x wider than they did (2026-10-30)."""
+    rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
+    if len(rets) < VOL_MIN_RETURNS:
+        return ""
+    mean = sum(rets) / len(rets)
+    sd = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
+    line = f"; daily s.d. {sd:.1%} over the last {len(rets)} sessions"
+    left = _sessions_until(question, now)
+    if left:
+        sessions, date = left
+        line += (f"; {sessions} sessions to {date}: 1 s.d. move ±{sd * math.sqrt(sessions):.1%}"
+                 f" (a normal's 10-90 range is ±1.28 s.d.)")
+    return line
+
+
+def stock_prices(question: Any, fetch: Fetch, now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
     text = _text_of(question)
     # Parenthesised capitals are tickers only in a question about prices:
     # elsewhere "(WHO)", "(CDC)" or "(FAA)" would fetch some unrelated
@@ -250,7 +290,7 @@ def stock_prices(question: Any, fetch: Fetch) -> str:
     for sym in list(dict.fromkeys(symbols))[:4]:
         try:
             data = _json(fetch, "https://query1.finance.yahoo.com/v8/finance/chart/"
-                         + urllib.parse.quote(sym) + "?range=1mo&interval=1d")
+                         + urllib.parse.quote(sym) + "?range=3mo&interval=1d")
             res = data["chart"]["result"][0]
             closes = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
             meta = res.get("meta", {})
@@ -258,9 +298,11 @@ def stock_prices(question: Any, fetch: Fetch) -> str:
             continue
         if not closes:
             continue
+        month = closes[-21:]
         lines.append(
             f"- {sym}: last close {closes[-1]:,.2f} {meta.get('currency', '')}; "
-            f"1-month range {min(closes):,.2f}–{max(closes):,.2f} [Yahoo, now]"
+            f"1-month range {min(month):,.2f}–{max(month):,.2f}"
+            f"{_volatility(closes, question, now)} [Yahoo, now]"
         )
     return "\n".join(lines)
 
