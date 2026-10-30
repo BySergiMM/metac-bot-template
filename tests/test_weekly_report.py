@@ -101,6 +101,23 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(wr.activity([post], {"market-pulse-26q4"}, self.SINCE)["forecast"], 3)
 
 
+class CalibrationPostTests(unittest.TestCase):
+    def test_a_group_post_is_read_by_its_questions_close(self):
+        group = {"id": 900010, "actual_close_time": None, "group_of_questions": {"questions": [
+            {"resolution": "37", "actual_close_time": "2026-10-20T00:00:00Z"},
+            {"resolution": None, "scheduled_close_time": "2026-12-01T00:00:00Z"}]}}
+        self.assertTrue(wr._resolved_since_new_system(group))
+        group["group_of_questions"]["questions"][0]["actual_close_time"] = "2026-10-01T00:00:00Z"
+        self.assertFalse(wr._resolved_since_new_system(group))
+
+    def test_the_posts_resolved_flag_counts_when_questions_lack_a_resolution(self):
+        post = {"id": 900011, "resolved": True, "actual_close_time": "2026-10-20T12:00:00Z",
+                "question": {"type": "binary"}}
+        self.assertTrue(wr._resolved_since_new_system(post))
+        post["resolved"] = False
+        self.assertFalse(wr._resolved_since_new_system(post))
+
+
 class MessageTests(unittest.TestCase):
     ROWS = [
         {"key": "futureeval", "label": "FutureEval ($50k)",

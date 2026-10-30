@@ -300,10 +300,28 @@ def coverage(client: MetaculusReadClient, project: str, since: datetime,
     return {"closed": result.closed, "missing": result.missing, "unchecked": result.unchecked}
 
 
+def _closed_at(post: dict[str, Any], question: dict[str, Any] | None = None) -> datetime | None:
+    """When the question (or the post) closed, falling back on the scheduled
+    close: a group's post carries no actual_close_time of its own (45995 and
+    46006, 2026-10-30), only its questions do."""
+    for source in ((question or {}), post):
+        for field in ("actual_close_time", "scheduled_close_time"):
+            when = _parse(source.get(field))
+            if when:
+                return when
+    return None
+
+
 def _resolved_since_new_system(post: dict[str, Any]) -> bool:
-    closed = _parse(post.get("actual_close_time"))
-    return bool(closed and closed >= calibration.NEW_SYSTEM_START
-                and any(q.get("resolution") not in (None, "") for q in _questions(post)))
+    """A question of the post resolved, or the post says it resolved, and
+    it closed after the current system started."""
+    cutoff = calibration.NEW_SYSTEM_START
+    for q in _questions(post):
+        closed = _closed_at(post, q)
+        if q.get("resolution") not in (None, "") and closed and closed >= cutoff:
+            return True
+    closed = _closed_at(post)
+    return bool(post.get("resolved") and closed and closed >= cutoff)
 
 
 def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] = print
@@ -330,12 +348,9 @@ def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] =
             except MetaculusReadError:
                 pass
     log(f"posts_detailed={detailed}")
-    # Which posts the calibration can read, and the resolved ones it cannot
-    # because the listing gives no close time: post ids only (public).
+    # Which posts the calibration reads: post ids only (public).
     calibrated = sorted(p["id"] for p in posts if _resolved_since_new_system(p))
-    no_close = sorted(p.get("id") for p in posts if not _parse(p.get("actual_close_time"))
-                      and any(q.get("resolution") not in (None, "") for q in _questions(p)))
-    log(f"calibration_posts n={len(calibrated)} ids={calibrated} resolved_without_close={no_close}")
+    log(f"calibration_posts n={len(calibrated)} ids={calibrated}")
     rows = []
     for t in targets(today):
         standing, note = fetch_standing(client, t.project)
