@@ -100,6 +100,23 @@ class PriceTests(unittest.TestCase):
         self.assertIn("bitcoin: $81,157 (24h -0.5%)", out)
 
 
+    def test_crypto_volatility_counts_every_day(self):
+        web = FakeWeb({"https://api.coingecko.com/": {"bitcoin": {"usd": 81157}},
+                       "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD": yahoo_series(91, step=0.02)})
+        question = q("Will Bitcoin close above $80,000?")
+        question.scheduled_resolution_time = datetime(2026, 11, 13, 21, tzinfo=timezone.utc)
+        out = lc.crypto_prices(question, web, now=self.NOW)
+        self.assertIn("daily s.d. 2.0% over the last 90 days", out)
+        # Weekends count: 14 days after 30 Oct, 2% x sqrt(14).
+        self.assertIn("14 days to 2026-11-13: 1 s.d. move ±7.5%", out)
+
+    def test_crypto_spot_price_survives_a_yahoo_failure(self):
+        web = FakeWeb({"https://api.coingecko.com/": {"bitcoin": {"usd": 81157}}})
+        out = lc.crypto_prices(q("Will Bitcoin close above $80,000?"), web)
+        self.assertIn("bitcoin: $81,157", out)
+        self.assertNotIn("s.d.", out)
+
+
 class LiveDataHygieneTests(unittest.TestCase):
     """The noise Test Bot run 39813843358 put in the Live data block."""
 

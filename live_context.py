@@ -200,7 +200,22 @@ def _own_text(question: Any) -> str:
     return "\n".join(str(getattr(question, a, "") or "") for a in ("question_text", "group_question_option"))
 
 
-def crypto_prices(question: Any, fetch: Fetch) -> str:
+#: Yahoo's symbol for each CoinGecko id, for the volatility line.
+YAHOO_COIN = {"bitcoin": "BTC-USD", "ethereum": "ETH-USD", "solana": "SOL-USD",
+              "ripple": "XRP-USD", "dogecoin": "DOGE-USD", "zcash": "ZEC-USD",
+              "cardano": "ADA-USD", "binancecoin": "BNB-USD", "litecoin": "LTC-USD"}
+
+
+def _coin_volatility(cid: str, question: Any, fetch: Fetch, now: datetime) -> str:
+    try:
+        closes, _ = _closes(fetch, YAHOO_COIN[cid])
+    except Exception:  # noqa: BLE001 - the spot price still goes
+        return ""
+    return _volatility(closes, question, now, every_day=True)
+
+
+def crypto_prices(question: Any, fetch: Fetch, now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
     words = set(re.findall(r"[a-z]+", _own_text(question).lower()))
     priced = _asks_a_price(question)
     ids = sorted({cg for w, cg in CRYPTO.items()
@@ -214,6 +229,7 @@ def crypto_prices(question: Any, fetch: Fetch) -> str:
         return ""
     return "\n".join(
         f"- {cid}: ${row['usd']:,} (24h {row.get('usd_24h_change', 0):+.1f}%) [CoinGecko, now]"
+        f"{_coin_volatility(cid, question, fetch, now) if cid in YAHOO_COIN else ''}"
         for cid, row in data.items() if isinstance(row, dict) and "usd" in row
     )
 
@@ -241,9 +257,11 @@ def _asks_a_price(question: Any) -> bool:
 VOL_MIN_RETURNS = 20
 
 
-def _sessions_until(question: Any, now: datetime) -> tuple[int, str] | None:
-    """Weekday sessions after today up to the question's scheduled resolution
-    (its close when that is missing), and that date; None when it is past."""
+def _sessions_until(question: Any, now: datetime, every_day: bool = False
+                    ) -> tuple[int, str] | None:
+    """Trading days after today up to the question's scheduled resolution
+    (its close when that is missing), and that date; None when it is past.
+    Weekdays for stocks; ``every_day`` for crypto, which trades all week."""
     when = getattr(question, "scheduled_resolution_time", None) or getattr(
         question, "close_time", None)
     if not isinstance(when, datetime):
@@ -253,26 +271,35 @@ def _sessions_until(question: Any, now: datetime) -> tuple[int, str] | None:
     if days < 1:
         return None
     sessions = sum(1 for d in range(1, days + 1)
-                   if (now.date() + timedelta(days=d)).weekday() < 5)
+                   if every_day or (now.date() + timedelta(days=d)).weekday() < 5)
     return (sessions, when.date().isoformat()) if sessions else None
 
 
-def _volatility(closes: list[float], question: Any, now: datetime) -> str:
+def _volatility(closes: list[float], question: Any, now: datetime, every_day: bool = False) -> str:
     """The typical move to the resolution date from the daily log returns:
     futuresearch sizes its numeric ranges this way, and five forecasters
     given only the price came out 2-3x wider than they did (2026-10-30)."""
     rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
     if len(rets) < VOL_MIN_RETURNS:
         return ""
+    unit = "days" if every_day else "sessions"
     mean = sum(rets) / len(rets)
     sd = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
-    line = f"; daily s.d. {sd:.1%} over the last {len(rets)} sessions"
-    left = _sessions_until(question, now)
+    line = f"; daily s.d. {sd:.1%} over the last {len(rets)} {unit}"
+    left = _sessions_until(question, now, every_day)
     if left:
         sessions, date = left
-        line += (f"; {sessions} sessions to {date}: 1 s.d. move ±{sd * math.sqrt(sessions):.1%}"
+        line += (f"; {sessions} {unit} to {date}: 1 s.d. move ±{sd * math.sqrt(sessions):.1%}"
                  f" (a normal's 10-90 range is ±1.28 s.d.)")
     return line
+
+
+def _closes(fetch: Fetch, symbol: str) -> tuple[list[float], dict]:
+    """About three months of Yahoo daily closes for ``symbol``, and its meta."""
+    data = _json(fetch, "https://query1.finance.yahoo.com/v8/finance/chart/"
+                 + urllib.parse.quote(symbol) + "?range=3mo&interval=1d")
+    res = data["chart"]["result"][0]
+    return [c for c in res["indicators"]["quote"][0]["close"] if c is not None], res.get("meta", {})
 
 
 def stock_prices(question: Any, fetch: Fetch, now: datetime | None = None) -> str:
@@ -289,11 +316,7 @@ def stock_prices(question: Any, fetch: Fetch, now: datetime | None = None) -> st
     lines = []
     for sym in list(dict.fromkeys(symbols))[:4]:
         try:
-            data = _json(fetch, "https://query1.finance.yahoo.com/v8/finance/chart/"
-                         + urllib.parse.quote(sym) + "?range=3mo&interval=1d")
-            res = data["chart"]["result"][0]
-            closes = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
-            meta = res.get("meta", {})
+            closes, meta = _closes(fetch, sym)
         except Exception:  # noqa: BLE001
             continue
         if not closes:
