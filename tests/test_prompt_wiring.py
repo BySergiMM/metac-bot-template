@@ -56,9 +56,15 @@ ADJUSTED_EPS_CRITERIA = (
     "quarter, as first reported by the company."
 )
 
-#: The width line the numeric prompt has always carried.
-WIDE = ("You remind yourself that good forecasters are humble and set wide 90/10 "
-        "confidence intervals to account for unknown unknowns.")
+#: The width line of every numeric prompt but GAAP EPS (since 2026-10-30).
+WIDE = ("You remind yourself that the outcome should land outside your 10-90 range about "
+        "one time in five: set the width from how much the quantity typically moves over "
+        "the time left, widen it for specific risks you can name, and do not pad it for "
+        "vague unknown unknowns; tails beyond your 10th and 90th percentiles are added "
+        "for you.")
+#: The template's width line, which the date prompt still carries.
+OLD_WIDE = ("You remind yourself that good forecasters are humble and set wide 90/10 "
+            "confidence intervals to account for unknown unknowns.")
 
 
 def load_main():
@@ -176,14 +182,15 @@ class NumericPromptTests(unittest.TestCase):
                 self.assertNotIn("This resolves on GAAP", text, slugs)
                 self.assertIn(WIDE, text, slugs)
 
-    def test_other_prompts_are_unchanged_byte_for_byte(self):
-        """A FutureEval prompt is what the old template produced: the old
-        width line straight after the conditional disclaimer, no blank line
-        where the note would go."""
+    def test_other_prompts_have_the_width_line_where_the_template_had_it(self):
+        """A FutureEval prompt: the two-way pre-mortem, then the width line
+        straight after the conditional disclaimer, no blank line where the
+        note would go."""
         text = self.prompt(numeric([FUTUREEVAL]))
         self.assertIn(
-            "and is that tail wide enough?\n\n\n" + WIDE + "\n\nThe last thing you write", text
+            "Say why, or narrow it.\n\n\n" + WIDE + "\n\nThe last thing you write", text
         )
+        self.assertNotIn(OLD_WIDE, text)
 
     def test_market_pulse_questions_that_are_not_gaap_eps_keep_the_old_prompt(self):
         for criteria in (REVENUE_CRITERIA, ADJUSTED_EPS_CRITERIA, "", None):
@@ -204,7 +211,7 @@ class NumericPromptTests(unittest.TestCase):
             src = handle.read()
         start = src.index("async def _run_forecast_on_date")
         body = src[start:src.index("async def _date_prompt_to_forecast", start)]
-        self.assertIn(WIDE, body)
+        self.assertIn(OLD_WIDE, body)
         self.assertNotIn("gaap", body.lower())
 
 

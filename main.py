@@ -644,10 +644,19 @@ class SummerTemplateBot2026(ForecastBot):
 
     ##################################### NUMERIC QUESTIONS #####################################
 
-    #: The width line every numeric prompt has carried since the template.
+    #: The width line of every numeric prompt but GAAP EPS. Until 2026-10-30 it
+    #: was the template's "good forecasters are humble and set wide 90/10
+    #: confidence intervals", and nothing in the prompt pushed the other way.
+    #: The outcome fell inside the old system's interquartile range 68% of the
+    #: time against an ideal 50% (88 resolved numerics), that range was 1.85x
+    #: futuresearch's, and the current system's is still 1.35x theirs on 22
+    #: open questions. numeric_shape adds the tails beyond p10/p90 in code.
     _WIDE_INTERVALS = (
-        "You remind yourself that good forecasters are humble and set wide 90/10 "
-        "confidence intervals to account for unknown unknowns."
+        "You remind yourself that the outcome should land outside your 10-90 range about "
+        "one time in five: set the width from how much the quantity typically moves over "
+        "the time left, widen it for specific risks you can name, and do not pad it for "
+        "vague unknown unknowns; tails beyond your 10th and 90th percentiles are added "
+        "for you."
     )
 
     #: Market Pulse EPS questions resolve on diluted EPS "in conformity with US
@@ -747,7 +756,7 @@ class SummerTemplateBot2026(ForecastBot):
             (d) The expectations of experts and markets.
             (e) A brief description of an unexpected scenario that results in a low outcome.
             (f) A brief description of an unexpected scenario that results in a high outcome.
-            (g) Pre-mortem: assume the outcome lands outside your 10-90 range. Which side is likelier, and is that tail wide enough?
+            (g) Pre-mortem: assume the outcome lands outside your 10-90 range. Which side is likelier, and is that tail wide enough? Then the other way: is your 10-90 range wider than the movement in (a0) supports? Say why, or narrow it.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
             {gaap_note}{width_line}
