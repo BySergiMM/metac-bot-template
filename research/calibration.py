@@ -110,13 +110,27 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
     briers: list[float] = []
     n_cont = in_iqr = in_80 = outside = 0
     past_open: list[float] = []
+    # Why resolved questions were left out, by type: counts, for the log.
+    skipped: dict[str, int] = {}
+
+    def skip(q: dict[str, Any], reason: str) -> None:
+        key = f"{q.get('type')}:{reason}"
+        skipped[key] = skipped.get(key, 0) + 1
+
     for q in questions:
         resolution = str(q.get("resolution") or "").strip().lower()
         if not resolution or resolution in ("annulled", "ambiguous"):
             continue
+        if not isinstance((q.get("my_forecasts") or {}).get("history"), list):
+            skip(q, "no_history")
+            continue
         forecast = scored_forecast(q)
-        values = (forecast or {}).get("forecast_values")
+        if forecast is None:
+            skip(q, "not_current_system")
+            continue
+        values = forecast.get("forecast_values")
         if not isinstance(values, list) or not values:
+            skip(q, "no_values:" + ",".join(sorted(forecast)))
             continue
         qtype = q.get("type")
         if qtype == "binary" and resolution in ("yes", "no") and len(values) >= 2:
@@ -125,6 +139,7 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         elif qtype in CONTINUOUS and len(values) >= 2:
             loc = location(q)
             if loc is None:
+                skip(q, "unreadable_resolution")
                 continue
             n_cont += 1
             if not 0.0 <= loc <= 1.0:
@@ -145,6 +160,7 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "in_80": in_80,
         "outside": outside,
         "past_open_bound": sum(past_open) / len(past_open) if past_open else None,
+        "skipped": skipped,
     }
 
 
