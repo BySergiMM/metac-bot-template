@@ -319,6 +319,17 @@ class AlreadyDeterminedWordingTests(unittest.TestCase):
             self.assertIn(words, prompt)
         self.assertLess(prompt.index("(e) Pre-mortem"), prompt.index("(f) Four checks"))
 
+    def test_the_binary_prompt_asks_the_longer_question_first(self):
+        # futuresearch's "longer-scope version of the question first".
+        bot = make_bot()
+        llm = FakeLlm("Probability: 50%")
+        bot.llm = llm
+        run(bot._run_forecast_on_binary(binary(), "research"))
+        prompt = llm.prompts[0]
+        self.assertIn("over a window twice as long as the one asked", prompt)
+        self.assertLess(prompt.index("(a) The time left"), prompt.index("(a1) If the question asks"))
+        self.assertLess(prompt.index("(a1) If the question asks"), prompt.index("(b) The status quo"))
+
 
 if __name__ == "__main__":
     unittest.main()
