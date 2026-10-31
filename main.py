@@ -524,6 +524,7 @@ class SummerTemplateBot2026(ForecastBot):
             Before answering you write:
             (a0) Before using the research: a reference class of similar past situations and how often they ended each way (the base rate), stated as a number.
             (a) The time left until the outcome to the question is known.
+            (a1) If the question asks whether something happens by a deadline, a longer version first: the probability of the same event over a window twice as long as the one asked. Then get the asked window from it (it cannot be more likely in less time; for a steady hazard, a window half as long has about half the chance of the event when it is unlikely). Otherwise write "n/a".
             (b) The status quo outcome if nothing changed.
             (c) A brief description of a scenario that results in a No outcome.
             (d) A brief description of a scenario that results in a Yes outcome.
