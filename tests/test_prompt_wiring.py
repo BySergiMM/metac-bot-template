@@ -327,8 +327,8 @@ class AlreadyDeterminedWordingTests(unittest.TestCase):
         run(bot._run_forecast_on_binary(binary(), "research"))
         prompt = llm.prompts[0]
         self.assertIn("over a window twice as long as the one asked", prompt)
-        self.assertLess(prompt.index("(a) The time left"), prompt.index("(a1) A longer version"))
-        self.assertLess(prompt.index("(a1) A longer version"), prompt.index("(b) The status quo"))
+        self.assertLess(prompt.index("(a) The time left"), prompt.index("(a1) If the question asks"))
+        self.assertLess(prompt.index("(a1) If the question asks"), prompt.index("(b) The status quo"))
 
 
 if __name__ == "__main__":
