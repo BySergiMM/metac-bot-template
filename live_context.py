@@ -472,6 +472,11 @@ def group_siblings(question: Any, fetch: Fetch) -> str:
             lines.append(f"- {label} ({when}): not forecast yet")
         else:  # the listing did not say: claim nothing about our forecast
             lines.append(f"- {label} ({when})")
+    # Counts only (public log): whether the listing carries our standing
+    # forecasts on siblings, which the SDK's listing was not known to do.
+    logger.info("group_siblings series=%d resolved=%d standing=%d unknown=%d", int(series),
+                sum(": resolved " in l for l in lines), sum("your standing forecast" in l for l in lines),
+                sum(not isinstance(q.get("my_forecasts"), dict) for q in others if _resolved(q) is None))
     if not lines:
         return ""
     note = ("Resolved values are facts. Your standing forecasts on the other periods are for "
@@ -714,6 +719,13 @@ def resolution_sources(question: Any, fetch: Fetch) -> str:
     return "\n\n".join(parts)
 
 
+def _period_series(question: Any, fetch: Fetch) -> str:
+    """Market Pulse's biweekly series, from their own sources: period_series."""
+    import period_series
+
+    return period_series.build(question, fetch)
+
+
 # ------------------------------------------------------------------- assemble
 
 SECTIONS = (
@@ -723,6 +735,8 @@ SECTIONS = (
     ("Other questions in this question's group", group_siblings),
     ("Current crypto prices", crypto_prices),
     ("Current stock/index prices", stock_prices),
+    ("The resolution source's own history for this period (computed now; normal approximations)",
+     _period_series),
     ("GAAP diluted EPS against the analyst consensus (this question resolves on GAAP)", eps_gaap),
     ("Possibly related prediction markets (check they ask the same thing before using them)",
      prediction_markets),
