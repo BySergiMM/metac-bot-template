@@ -438,6 +438,44 @@ def room_for_extras(now: datetime | None = None) -> bool:
         return False
 
 
+#: Opus forecasts per question in the prize tournaments, and how many while
+#: the cycle's pace would end over budget.
+PRIZE_FORECASTS = 3
+PRIZE_FORECASTS_TIGHT = 2
+
+
+def prize_forecasts(now: datetime | None = None) -> int:
+    """How many Opus forecasts a prize question gets: PRIZE_FORECASTS, fewer
+    while the cycle's projected spend reaches the budget, 0 once over_budget
+    (Haiku then, see main.py). Claude is the only key, so this is what keeps
+    the month inside it. PRIZE_FORECASTS on any error or without a day of data:
+    over_budget still stops it."""
+    now = now or datetime.now(timezone.utc)
+    if over_budget(now):
+        return 0
+    try:
+        lines = load()
+        pace = projection(month_spend(lines, now), now, counted_since(lines, now))
+        if pace is not None and pace >= budget_usd(now):
+            return PRIZE_FORECASTS_TIGHT
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("plan", exc)
+    return PRIZE_FORECASTS
+
+
+#: Where the forecasters should be Opus while there is budget.
+OPUS_TOURNAMENTS = ("futureeval", "market_pulse")
+
+
+def degraded_forecasts(lines: list[dict], run_id: str | None) -> list[str]:
+    """The models that forecast a prize question in this run when none was
+    Opus: what the failure of 2026-10-25 looked like, nine days unnoticed."""
+    forecast = [l for l in calls(lines) if run_id and l.get("run") == run_id
+                and l.get("phase") == "forecast" and l.get("tour") in OPUS_TOURNAMENTS]
+    models = sorted({str(l.get("model")) for l in forecast})
+    return [] if not models or any("opus" in m for m in models) else models
+
+
 ############################## MESSAGES ##############################
 
 def money(x: float) -> str:
@@ -584,6 +622,16 @@ def after_run(now: datetime | None = None, send=_send) -> bool:
             with open(path, "a", encoding="utf-8") as handle:
                 for t in crossed:
                     handle.write(json.dumps({"t": stamp, "kind": "alert", "month": _month(now), "threshold": t}) + "\n")
+            lines, changed = load(path), True
+    degraded = degraded_forecasts(lines, run_id)
+    day = now.date().isoformat()
+    if degraded and not over_budget(now) and not any(
+            l.get("kind") == "model_alert" and l.get("day") == day for l in lines):
+        if send("🚨 METACULUS BOT: FutureEval o Market Pulse han pronosticado sin Opus, con "
+                + ", ".join(short_model(m) for m in degraded) + ". Revisa la clave de Claude."):
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"t": now.isoformat(timespec="seconds"),
+                                         "kind": "model_alert", "day": day}) + "\n")
             lines, changed = load(path), True
     line = run_line(lines, run_id, now)
     print(line)

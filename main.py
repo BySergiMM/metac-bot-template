@@ -227,6 +227,17 @@ class SummerTemplateBot2026(ForecastBot):
     #: whose listing carried no usable CP. None: the listing alone.
     cp_pool_fetch = None
 
+    #: True where the budget does not stretch to Opus: the forecaster is then the
+    #: summarizer's model, Haiku 5.5, on the same key (spend.prize_forecasts and
+    #: the bottom of this file; owner, 2026-11-03: the 100 EUR a month and no
+    #: other key).
+    cheap_forecast = False
+
+    def get_llm(self, purpose="default", guarantee_type=None):
+        if purpose == "default" and self.cheap_forecast:
+            purpose = "summarizer"
+        return super().get_llm(purpose, guarantee_type)
+
     ############################## SPEND LABELS ##############################
     # Which question and phase each paid call belongs to; see spend.py.
 
@@ -1198,7 +1209,7 @@ if __name__ == "__main__":
     template_bot = SummerTemplateBot2026(
         metaculus_client=client,
         research_reports_per_question=1,
-        predictions_per_research_report=5,
+        predictions_per_research_report=spend.PRIZE_FORECASTS,
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=publish_to_metaculus,
         folder_to_save_reports_to=None,
@@ -1249,17 +1260,35 @@ if __name__ == "__main__":
     # Dispatch on mode. Each branch produces a list of ForecastReport (or
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
-    # The second research pass, for the prize tournaments only, while the
-    # cycle's projected Claude spend leaves room (spend.room_for_extras) and
-    # the SECOND_RESEARCH variable is not "off".
-    second_research = (prize_depth == "full" and os.getenv("SECOND_RESEARCH", "on") != "off"
+    # The second research pass, off unless the SECOND_RESEARCH variable says "on"
+    # since Claude pays for the forecasts too (2026-11-03); even then only while
+    # the cycle's projected spend leaves room (spend.room_for_extras).
+    second_research = (prize_depth == "full" and os.getenv("SECOND_RESEARCH", "off") == "on"
                        and spend.room_for_extras())
     logger.info("second_research enabled=%d", int(second_research))
+
+    # Who forecasts, within the 100 EUR a month on the one key: Opus for the two
+    # tournaments that can pay (owner, 2026-10-23), as many forecasts as the
+    # budget's pace allows; Haiku for MiniBench and the Cup, and for everything
+    # once the budget is spent.
+    opus_forecasts = spend.prize_forecasts()
+    logger.info("prize_forecasts opus=%d", opus_forecasts)
+
+    def forecast_with_opus() -> None:
+        template_bot.cheap_forecast = opus_forecasts == 0
+        template_bot.predictions_per_research_report = opus_forecasts or spend.PRIZE_FORECASTS_TIGHT
+
+    def forecast_with_haiku() -> None:
+        template_bot.cheap_forecast = True
+        template_bot.predictions_per_research_report = spend.PRIZE_FORECASTS
+
+    forecast_with_opus()
 
     if run_mode == "tournament":
         spend.set_tournament("futureeval")
         template_bot.research_depth = prize_depth
         template_bot.second_research = second_research
+        forecast_with_opus()
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.FUTUREEVAL.id, return_exceptions=True
@@ -1268,6 +1297,7 @@ if __name__ == "__main__":
         spend.set_tournament("minibench")
         template_bot.research_depth = other_depth
         template_bot.second_research = False
+        forecast_with_haiku()
         minibench_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.MINIBENCH.id, return_exceptions=True
@@ -1284,6 +1314,7 @@ if __name__ == "__main__":
         # good mix of question types (FutureEval resources page).
         template_bot.skip_previously_forecasted_questions = False
         template_bot.research_depth = other_depth
+        forecast_with_haiku()
         spend.set_tournament("cup")
         forecast_reports = asyncio.run(
             template_bot.forecast_questions(
@@ -1306,6 +1337,7 @@ if __name__ == "__main__":
         template_bot.skip_previously_forecasted_questions = False
         spend.set_tournament("market_pulse")
         template_bot.second_research = second_research
+        forecast_with_opus()
         # The final forecast pooled with the revealed human community
         # prediction (cp_pool.py), at the weight in MP_CP_POOL_WEIGHT; unset
         # or 0 leaves it off.

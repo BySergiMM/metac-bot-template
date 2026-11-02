@@ -127,8 +127,8 @@ class NoForecastContentReachesLogs(unittest.TestCase):
 
 
 class ForecastIntegrityInvariants(unittest.TestCase):
-    def test_five_predictions_per_research_report(self):
-        self.assertIn("predictions_per_research_report=5,", read("main.py"))
+    def test_predictions_per_research_report_comes_from_the_budget_plan(self):
+        self.assertIn("predictions_per_research_report=spend.PRIZE_FORECASTS,", read("main.py"))
 
     def test_one_research_report_per_question(self):
         self.assertIn("research_reports_per_question=1,", read("main.py"))
@@ -632,23 +632,17 @@ class WorkflowInvariants(unittest.TestCase):
         self.assertNotIn("secrets.", src)
         self.assertNotIn("python main.py", src)
 
-    def test_production_uses_exactly_one_gemini_credential(self):
-        """R11. Four credentials from four Google projects give one
-        application 60 RPM where one project allows 15. Google documents that
-        limits are per project, and the APIs ToS 2.d forbids attempting to
-        circumvent them, but no Google source says whether one workload across
-        several projects is circumvention. Unresolved, so production carries
-        one credential. The code that could spread calls over several has been
-        removed, so this keeps the workflow from suggesting otherwise. See the
-        note in the workflow."""
-        src = yaml_without_comments(*self.PRODUCTION)
-        self.assertIn("GEMINI_API_KEY:", src, "the fallback leg must stay")
-        for extra in ("GEMINI2_API_KEY:", "GEMINI3_API_KEY:", "GEMINI4_API_KEY:"):
-            self.assertNotIn(
-                extra, src,
-                "additional Gemini projects must not reach production while "
-                "the quota-circumvention question is unresolved",
-            )
+    def test_the_bot_gets_the_anthropic_key_and_no_other_llm_key(self):
+        """Owner, 2026-11-03. On 2026-10-25 the sponsored OpenRouter key hit its
+        limit and Gemini forecast in Opus's place for nine days, unnoticed."""
+        others = ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY",
+                  "ASKNEWS_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET",
+                  "PERPLEXITY_API_KEY", "EXA_API_KEY")
+        for workflow in ("run_bot_on_tournament.yaml", "run_bot_on_metaculus_cup.yaml", "test_bot.yaml"):
+            src = yaml_without_comments(".github", "workflows", workflow)
+            self.assertIn("ANTHROPIC_API_KEY:", src, workflow)
+            for other in others:
+                self.assertNotIn(other, src, workflow)
 
     def test_extra_gemini_credentials_generate_no_per_credential_wiring(self):
         """The R11 reduction must be real, not cosmetic: a second Gemini
@@ -664,13 +658,13 @@ class WorkflowInvariants(unittest.TestCase):
         import sys
 
         names = ("GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY",
-                 "GEMINI4_API_KEY", "GROQ_API_KEY")
+                 "GEMINI4_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY")
         saved = {key: os.environ.get(key) for key in names}
         for key in saved:
             os.environ.pop(key, None)
         os.environ.update(GEMINI_API_KEY="one", GEMINI2_API_KEY="two",
                           GEMINI3_API_KEY="three", GEMINI4_API_KEY="four",
-                          GROQ_API_KEY="g")
+                          GROQ_API_KEY="g", ANTHROPIC_API_KEY="k")
         try:
             sys.modules.pop("backtest.pin_models", None)
             pin_models = importlib.import_module("backtest.pin_models")
@@ -838,10 +832,6 @@ class WorkflowInvariants(unittest.TestCase):
         chain_keys = sorted({
             env for _model, env in pin.FALLBACK_CHAIN + pin.PARSER_EXTRA_CHAIN
         })
-        # The AskNews credential gates the researcher's chain at patch time
-        # in exactly the same way (pin_models.ACTIVE_ASKNEWS), so it is held
-        # to the same rule: present in both steps or in neither.
-        chain_keys += sorted(pin.ASKNEWS_ENV_VARS)
         self.assertTrue(chain_keys, "no chain-gating credentials found")
         workflow_dir = os.path.join(ROOT, ".github", "workflows")
         checked = 0
@@ -902,9 +892,8 @@ class WorkflowInvariants(unittest.TestCase):
                             name, var),
                     )
                 checked += 1
-        # Pin + Run bot in test_bot and the Cup workflow, Pin + Run bot + Cup
-        # in the tournament workflow.
-        self.assertGreaterEqual(checked, 7, "expected every pin and run step")
+        # None since 2026-11-03: the bot gets the Anthropic key and no other.
+        self.assertEqual(checked, 0, "an AskNews credential is back in a workflow")
 
     def test_every_workflow_that_can_publish_to_a_scored_tournament_pins_models(self):
         """Without pin_models, forecasting-tools assigns the researcher role to
@@ -1156,7 +1145,7 @@ class GeneratedCodeInvariants(unittest.TestCase):
 
     def test_generated_code_keeps_the_forecast_integrity_settings(self):
         generated = self._generate(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-        self.assertIn("predictions_per_research_report=5,", generated)
+        self.assertIn("predictions_per_research_report=spend.PRIZE_FORECASTS,", generated)
         self.assertIn("skip_previously_forecasted_questions=True,", generated)
 
     def test_the_generator_only_touches_the_llms_block(self):
@@ -1199,7 +1188,8 @@ class GeneratedCodeInvariants(unittest.TestCase):
         # legitimate difference.
         cleaned = strip_llms(generated)
         for import_line in ("from backtest.fallback_llm import FallbackLlm\n",
-                            "from backtest.balanced_llm import BalancedLlm\n"):
+                            "from backtest.balanced_llm import BalancedLlm\n",
+                            "from backtest.claude_llm import ClaudeLlm\n"):
             cleaned = cleaned.replace(import_line, "")
         self.assertEqual(cleaned, strip_llms(original))
 

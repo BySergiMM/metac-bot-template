@@ -73,16 +73,16 @@ jobs:
       SPEND_LEDGER_PATH: spend_ledger.jsonl
       CLAUDE_BUDGET_USD: ${{ vars.CLAUDE_BUDGET_USD || '100' }}
       SPEND_ALERT_THRESHOLDS: ${{ vars.SPEND_ALERT_THRESHOLDS || '0.8,1.0' }}
-      SPEND_THROTTLE_AT: ${{ vars.SPEND_THROTTLE_AT || '1.0' }}
+      SPEND_THROTTLE_AT: ${{ vars.SPEND_THROTTLE_AT || '0.9' }}
       # The day the Claude credit renews (the owner's renews on the 28th), and
       # an optional ISO date before which what is left of it buys full
       # research everywhere (spend.boost_active). Both repository variables.
       CLAUDE_BUDGET_CYCLE_DAY: ${{ vars.CLAUDE_BUDGET_CYCLE_DAY || '1' }}
       RESEARCH_BOOST_UNTIL: ${{ vars.RESEARCH_BOOST_UNTIL || '' }}
       # The second, independent research pass on FutureEval and Market Pulse
-      # (main.py, second_research): "off" stops it. It also stops by itself
-      # while the cycle's projected Claude spend is over 80% of the budget.
-      SECOND_RESEARCH: ${{ vars.SECOND_RESEARCH || 'on' }}
+      # (main.py, second_research): off since Claude pays for the forecasts too.
+      # "on" runs it while the cycle's projected spend is under 80% of the budget.
+      SECOND_RESEARCH: ${{ vars.SECOND_RESEARCH || 'off' }}
       # Market Pulse earnings dossiers (mp_dossier.py), restored from the
       # Actions cache below; only Market Pulse questions read them.
       MP_DOSSIERS_PATH: mp_dossiers.json
@@ -137,66 +137,14 @@ jobs:
           key: mp-dossiers-${{ github.run_id }}
           restore-keys: |
             mp-dossiers-
-      # forecasting-tools assigns the researcher role to a model OpenRouter no
-      # longer serves, which 404s every question. This activates the pinned llms
-      # block in main.py so the run uses models that actually exist.
-      # The fallback chain activates only for keys present HERE: pin_models.py
-      # reads os.environ at patch time, so a secret that reaches the bot step
-      # but not this one produces a chain that silently stays empty.
+      # Writes the llms block into main.py: every role on the Anthropic key, the
+      # only one the bot gets (owner, 2026-11-03; see backtest/pin_models.py).
+      # pin_models reads the key at patch time to decide the chain, so it must be
+      # here as well as on the steps that run the bot.
       - name: Pin LLM models
         run: python backtest/pin_models.py
         env:
-          # R11 -- ONE Gemini credential, deliberately.
-          #
-          # The code that turned extra Gemini credentials into extra chains
-          # (added in d6e60ca: bucket_backend, limiter_key, one chain per
-          # credential) has been removed, so nothing reads GEMINI2/3/4_API_KEY
-          # any more. They are NOT passed to production, and any repository
-          # secrets of those names can be deleted.
-          #
-          # Why: four credentials from four Google projects, driven by one
-          # application, obtain 4 x 15 = 60 RPM where one project allows 15.
-          #   FACT   Google documents "Rate limits are applied per project, not
-          #          per API key", and separate projects as the mechanism for
-          #          isolated quota.
-          #   FACT   Google APIs ToS 2.d: Google sets and enforces API limits
-          #          "in our sole discretion" and the developer agrees not to
-          #          attempt to circumvent them; exceeding documented limits
-          #          needs Google's express written consent.
-          #   UNKNOWN No Google document states whether one workload spanning
-          #          several projects is permitted or is circumvention.
-          # "Not mentioned" is not "allowed", and the downside is asymmetric: a
-          # quota-circumvention finding restricts the projects, and it would do
-          # so mid-tournament.
-          #
-          # The cost of one credential is throughput in a DEGRADED mode only.
-          # Gemini is the second link of OpenRouter -> Gemini -> Groq and is
-          # reached only when OpenRouter actually fails. A saturated limiter
-          # makes the call WAIT, not fail, and past the 300s ceiling it
-          # raises RateLimitTimeout, which fails over to Groq. Prediction
-          # counts, aggregation and the success threshold are untouched either
-          # way.
-          #
-          # To re-enable after establishing compliance: restore the removed
-          # code from git history (`git log -S bucket_backend`), add the three
-          # env vars back to BOTH the pin step and the Run bot step, and
-          # delete the assertion in tests/test_production_invariants.py.
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          # Gates the chain at PATCH time. pin_models reads os.environ here to
-          # decide which backends to write into the llms= block, so a key that
-          # reaches "Run bot" but not this step produces a SHORTER chain with
-          # no error: claude-haiku-4.5 silently vanished from the ensemble and
-          # from the parser in production while every E2E passed, because
-          # test_bot.yaml had this key and these two did not.
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          # Gates the researcher's news feed at PATCH time, like the keys
-          # above: pin_models leads the researcher with AskNews only when one
-          # of these is present here. Absent (no secret set) means no change.
-          # Must match the Run bot step; test_production_invariants compares.
-          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # POLLING LOOP, not a single shot. R8 follow-up.
       #
       # docs/cadence.md measured `*/5` delivering 32 min median gaps (14% of
@@ -323,20 +271,10 @@ jobs:
           # and two in a row means the tournaments are genuinely quiet.
           POLL_IDLE_LIMIT: "2"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-          # Fallback providers. Both verified by research/smoke_test_providers.py
-          # before being wired in; absent keys simply disable their leg.
+              # before being wired in; absent keys simply disable their leg.
           # See the R11 note on the pin step above: one Gemini credential,
           # on purpose.
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # Kept for the failure alert below; per-question alerts were retired
           # (2026-10-17) in favour of the Monday report (weekly_report.yaml).
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
@@ -361,16 +299,7 @@ jobs:
         run: poetry run python main.py --mode market_pulse
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       # PRACTICE, NOT PRIZES. Metaculus Cup Fall 2026 (tournaments.METACULUS_CUP)
       # ranks bots against the human crowd but pays none; the FutureEval
       # resources page recommends it for measuring a bot on diverse questions.
@@ -399,16 +328,7 @@ jobs:
         # test_production_invariants compares the two blocks.
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       # One WhatsApp alert the first time a month crosses each threshold of
       # the Claude-API budget, and this run's spend in the step summary. Never
       # fails the job (spend.py swallows its own errors; continue-on-error is
