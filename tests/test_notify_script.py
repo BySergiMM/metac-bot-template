@@ -74,6 +74,20 @@ class SendWhatsapp(unittest.TestCase):
         ):
             notify.send_whatsapp("hi", api_key="k", phone_number="+1")  # must not raise
 
+    def test_a_refusal_with_http_200_is_a_delivery_error_that_hides_the_body(self):
+        response = _FakeResponse()
+        response.read = lambda: b"APIKey is invalid. key=secret-key"
+        with unittest.mock.patch("scripts.notify.urllib.request.urlopen", return_value=response):
+            with self.assertRaises(notify.DeliveryError) as caught:
+                notify.send_whatsapp("hi", api_key="secret-key", phone_number="+34600000000")
+        self.assertNotIn("secret-key", str(caught.exception))
+
+    def test_a_word_of_the_message_echoed_back_is_not_a_refusal(self):
+        response = _FakeResponse()
+        response.read = lambda: b"Message queued. Text: the workflow had an error, invalid run"
+        with unittest.mock.patch("scripts.notify.urllib.request.urlopen", return_value=response):
+            notify.send_whatsapp("hi", api_key="k", phone_number="+34600000000")
+
     def test_the_api_key_never_appears_in_a_raised_exception(self):
         secret = "sk-super-secret-000111"
 
