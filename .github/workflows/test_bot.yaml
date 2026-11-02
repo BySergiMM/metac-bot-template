@@ -63,22 +63,9 @@ jobs:
       - name: Pin and verify LLM models
         run: poetry run python backtest/pin_models.py --check
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          # Without these, pin_models emits a single GeneralLlm per role and
-          # this smoke test exercises a configuration production never runs --
-          # no fallback ladder, no forecaster ensemble. Run 34114505848 died on
-          # OpenRouter's free daily cap with nothing behind it, which is
-          # precisely the failure production is built to survive. A pre-flight
-          # check that does not check the real thing is worse than none.
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          # Gates the researcher's news feed at PATCH time, like the keys
-          # above: pin_models leads the researcher with AskNews only when one
-          # of these is present here. Absent (no secret set) means no change.
-          # Must match the Run bot step; test_production_invariants compares.
-          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # The chain is decided at patch time from the key, so the smoke test
+          # exercises what production runs.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Read at PATCH time, like the keys above: it is written into the
           # generated llms= block, so the Run bot step needs nothing.
           FORECASTER_REASONING_OPUS: ${{ inputs.opus_reasoning }}
@@ -87,17 +74,8 @@ jobs:
           poetry run python main.py --mode test_questions
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_RESEARCH_ENGINE: ${{ inputs.research_engine }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
       # Breakdown of what this test run cost, in the log and the step summary.
       # No WhatsApp credentials reach this step, so it can never alert.
       - name: Spend of this run

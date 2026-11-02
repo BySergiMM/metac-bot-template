@@ -35,9 +35,12 @@ class RegisterModelPricesTests(unittest.TestCase):
         litellm.model_cost.update(self._saved)
 
     def test_the_table_covers_the_forecaster(self):
-        """The one model this exists for. A future forecaster that litellm's
-        bundled map does not know needs its own row, with a verified price."""
-        self.assertIn(pin_models.DEFAULTS["default"], bot_helpers.KNOWN_MODEL_PRICES_PER_MTOK)
+        """Since 2026-11-03 the forecaster is called through ClaudeLlm, which
+        prices its calls from claude_research.ENGINES, not from litellm."""
+        import claude_research
+
+        api_id = pin_models.DEFAULTS["default"].partition("/")[2]
+        self.assertIn(api_id, [e.model for e in claude_research.ENGINES.values()])
 
     def test_a_missing_model_is_registered_at_the_verified_price(self):
         litellm.model_cost.pop(OPUS, None)

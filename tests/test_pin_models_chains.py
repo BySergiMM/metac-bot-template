@@ -20,7 +20,7 @@ import unittest
 # leak into what a test believes it is exercising.
 MANAGED_ENV = (
     "GEMINI_API_KEY", "GEMINI2_API_KEY", "GEMINI3_API_KEY", "GEMINI4_API_KEY",
-    "GROQ_API_KEY", "OPENROUTER_API_KEY",
+    "GROQ_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
     "ASKNEWS_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET",
     # Not a credential, but read at import time the same way: a developer's
     # own setting must not change the effort a test believes it generates.
@@ -84,14 +84,7 @@ def load(**env):
 
 class GeneratedBlockTests(unittest.TestCase):
     def test_single_key_output_contains_no_per_credential_machinery(self):
-        """One Gemini credential produces no PER-CREDENTIAL wiring: no
-        bucket_backend, no limiter_key, and no GEMINI2/3/4 env var name.
-
-        BalancedLlm is not evidence of any such wiring: the forecaster
-        ensemble uses that class to spread the five forecast calls over the
-        distinct primary models, which needs exactly one credential each.
-        """
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm = load(ANTHROPIC_API_KEY="k")
         block = pm.build_block(pm.DEFAULTS)
         self.assertNotIn("bucket_backend", block)
         self.assertNotIn("limiter_key", block)
@@ -103,38 +96,35 @@ class GeneratedBlockTests(unittest.TestCase):
         """The ensemble machinery survives FORECAST_GRADE being empty today:
         list a fallback as forecast grade and the default role ensembles
         across it again, while the once-per-question roles stay single."""
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-        pm.FORECAST_GRADE = frozenset({GEMINI})
+        pm = load(ANTHROPIC_API_KEY="k")
+        pm.FORECAST_GRADE = frozenset({HAIKU})
         block = pm.build_block(pm.DEFAULTS)
         default_entry = block[block.index('"default"'):block.index('"summarizer"')]
         self.assertIn("BalancedLlm", default_entry)
         for primary in pm._ensemble_primaries(pm.DEFAULTS["default"]):
             self.assertIn('"{0}"'.format(primary), default_entry)
-        # Roles called once per question gain nothing from a lottery over
-        # models, so they stay single chains.
         rest = block[block.index('"summarizer"'):]
         self.assertNotIn("BalancedLlm", rest)
 
-    def test_the_parser_keeps_gemini_and_never_gains_gpt_oss(self):
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+    def test_the_block_names_no_other_provider_whatever_keys_are_present(self):
+        """Owner, 2026-11-03: the Claude key and no other. A stray secret must
+        not bring a provider back."""
+        pm = load(ANTHROPIC_API_KEY="k", OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
         block = pm.build_block(pm.DEFAULTS)
-        parser = block[block.index('"parser"'):]
-        self.assertIn("gemini/gemini-3.5-flash-lite", parser)
-        self.assertNotIn("gpt-oss-120b", parser,
-                         "the parser must not gain a backend that answers in prose")
+        for other in ("openrouter", "gemini", "groq", "openai"):
+            self.assertNotIn(other, block)
 
     def test_no_credential_value_is_ever_written_into_the_block(self):
         """Only variable NAMES may appear; a secret must not reach main.py."""
-        pm = load(OPENROUTER_API_KEY="SECRET-O", GEMINI_API_KEY="SECRET-A",
-                  GROQ_API_KEY="SECRET-G")
+        pm = load(ANTHROPIC_API_KEY="SECRET-C", OPENROUTER_API_KEY="SECRET-O")
         block = pm.build_block(pm.DEFAULTS)
-        for secret in ("SECRET-O", "SECRET-A", "SECRET-G"):
+        for secret in ("SECRET-C", "SECRET-O"):
             self.assertNotIn(secret, block)
 
     def test_generated_code_is_valid_python(self):
         import ast
 
-        pm = load(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm = load(ANTHROPIC_API_KEY="k")
         block = pm.build_block(pm.DEFAULTS).strip().rstrip(",")
         # The block is `llms={...}`; parse the dict literal it assigns.
         self.assertTrue(block.startswith("llms="))
@@ -171,13 +161,8 @@ class ExtraGeminiCredentialsAreInertTests(unittest.TestCase):
                     self.assertNotIn(name, with_extra)
 
 
-HAIKU = "openrouter/anthropic/claude-haiku-4.5"
-OPUS = "openrouter/anthropic/claude-opus-5.5"
-GPT_4O_MINI = "openrouter/openai/gpt-4o-mini"
-GEMINI = "gemini/gemini-3.5-flash-lite"
-GROQ_OSS = "groq/openai/gpt-oss-120b"
-GROQ_QWEN = "groq/qwen/qwen3.8-27b"
-GPT_SOL = "openrouter/openai/gpt-5.6-sol"
+HAIKU = "anthropic/claude-haiku-5-5"
+OPUS = "anthropic/claude-opus-5-5"
 
 
 def chains_by_role(pm, models):
@@ -199,7 +184,7 @@ def chains_by_role(pm, models):
             return node.value
         assert isinstance(node, ast.Call), ast.dump(node)
         name = getattr(node.func, "id", None)
-        if name == "GeneralLlm":
+        if name in ("GeneralLlm", "ClaudeLlm"):
             return next(k.value.value for k in node.keywords if k.arg == "model")
         raise AssertionError("unexpected backend expression: " + ast.dump(node))
 
@@ -226,15 +211,10 @@ class ChainsNameEachBackendOnceTests(unittest.TestCase):
     backend that had just failed, which TRIES_IN_CHAIN = 1 exists to prevent.
     """
 
-    PRODUCTION = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="g", GROQ_API_KEY="q")
+    PRODUCTION = dict(ANTHROPIC_API_KEY="k")
 
     def test_no_generated_chain_repeats_a_backend(self):
-        for label, env in (
-            ("production", self.PRODUCTION),
-            ("gemini and groq only", dict(GEMINI_API_KEY="g", GROQ_API_KEY="q")),
-            ("openrouter only", dict(OPENROUTER_API_KEY="o")),
-            ("groq only", dict(GROQ_API_KEY="q")),
-        ):
+        for label, env in (("production", self.PRODUCTION), ("no key", {})):
             pm = load(**env)
             for role, chains in chains_by_role(pm, pm.DEFAULTS).items():
                 for chain in chains:
@@ -245,69 +225,38 @@ class ChainsNameEachBackendOnceTests(unittest.TestCase):
                         )
 
     def test_the_production_chains_are_exactly_these_and_in_this_order(self):
-        """Pins the shape production runs, so de-duplicating cannot reorder or
-        drop a link: the primary leads, the rest keep their configured order."""
+        """Opus forecasts with Haiku behind it; the rest is Haiku. Nothing from
+        another provider, so nothing can stand in for Opus unnoticed on a key
+        nobody is watching (the failure of 2026-10-25)."""
         pm = load(**self.PRODUCTION)
         chains = chains_by_role(pm, pm.DEFAULTS)
-        self.assertEqual(chains["researcher"], [[HAIKU, GEMINI, GROQ_OSS]])
-        self.assertEqual(chains["summarizer"], [[HAIKU, GEMINI, GROQ_OSS]])
-        # Claude parses since 2026-10-22; gpt-4o-mini only catches an outage.
-        self.assertEqual(
-            chains["parser"], [[HAIKU, GEMINI, GPT_4O_MINI, GROQ_QWEN]])
-        # The forecaster: Opus and GPT-5.6 Sol share the five calls (one chain
-        # each, see FORECAST_VOTERS); the cheap models only catch a failure.
-        # They used to be ensemble voters, which put three or four of every
-        # five forecasts on them (see FORECAST_GRADE).
-        self.assertEqual(chains["default"], [
-            [OPUS, GPT_SOL, HAIKU, GEMINI, GROQ_OSS],
-            [GPT_SOL, OPUS, HAIKU, GEMINI, GROQ_OSS],
-        ])
+        self.assertEqual(chains["researcher"], [[HAIKU]])
+        self.assertEqual(chains["summarizer"], [[HAIKU]])
+        self.assertEqual(chains["parser"], [[HAIKU]])
+        self.assertEqual(chains["default"], [[OPUS, HAIKU]])
 
-    def test_cheap_fallbacks_never_vote_in_the_forecaster_ensemble(self):
+    def test_the_cheap_fallback_never_votes_in_the_forecaster_ensemble(self):
         pm = load(**self.PRODUCTION)
-        self.assertEqual(pm._ensemble_primaries(pm.DEFAULTS["default"]), [OPUS, GPT_SOL])
-        for cheap in (HAIKU, GEMINI, GROQ_OSS):
-            self.assertNotIn(cheap, pm.FORECAST_GRADE)
-            self.assertNotIn(cheap, [m for m, _ in pm.FORECAST_VOTERS])
-
-    def test_voters_were_smoke_tested_and_cost_no_more_than_opus(self):
-        """Provenance, like test_fallback_llm's verified set: a voter answers
-        every question, so it must have passed a real completion first."""
-        import backtest.pin_models as pin
-        verified = {GPT_SOL}  # smoke-test run 39073967369: http/litellm/structured OK
-        for model, _env in pin.FORECAST_VOTERS:
-            self.assertIn(model, verified, model + " was never smoke-tested")
-
-    def test_voters_reach_only_the_forecaster(self):
-        pm = load(**self.PRODUCTION)
-        chains = chains_by_role(pm, pm.DEFAULTS)
-        for role in ("researcher", "summarizer", "parser"):
-            for chain in chains[role]:
-                self.assertNotIn(GPT_SOL, chain, role)
+        self.assertEqual(pm._ensemble_primaries(pm.DEFAULTS["default"]), [OPUS])
+        self.assertNotIn(HAIKU, pm.FORECAST_GRADE)
+        self.assertEqual(pm.FORECAST_VOTERS, [])
 
     def test_a_forecast_grade_fallback_gets_its_own_chain(self):
-        """How a second frontier voter would be wired: one chain per primary,
-        that primary first and the others behind it in primary order."""
+        """How a second voter would be wired: one chain per primary, that
+        primary first and the others behind it in primary order."""
         pm = load(**self.PRODUCTION)
-        pm.FORECAST_GRADE = frozenset({GEMINI})
+        pm.FORECAST_GRADE = frozenset({HAIKU})
         chains = chains_by_role(pm, pm.DEFAULTS)
-        self.assertEqual(chains["default"], [
-            [OPUS, GEMINI, GPT_SOL, HAIKU, GROQ_OSS],
-            [GEMINI, OPUS, GPT_SOL, HAIKU, GROQ_OSS],
-            [GPT_SOL, OPUS, GEMINI, HAIKU, GROQ_OSS],
-        ])
+        self.assertEqual(chains["default"], [[OPUS, HAIKU], [HAIKU, OPUS]])
 
     def test_an_override_naming_a_fallback_model_does_not_repeat_it(self):
         """models.txt can set any role to any model, including one that is also
         a fallback. The first occurrence wins and the order is otherwise kept."""
         pm = load(**self.PRODUCTION)
-        chains = chains_by_role(pm, dict(pm.DEFAULTS, researcher=GEMINI))
-        self.assertEqual(chains["researcher"], [[GEMINI, HAIKU, GROQ_OSS]])
-        # The parser excluded DEFAULTS["parser"] rather than the configured
-        # primary, so overriding it with a model that is also a fallback
-        # repeated that model.
-        chains = chains_by_role(pm, dict(pm.DEFAULTS, parser=GPT_4O_MINI))
-        self.assertEqual(chains["parser"], [[GPT_4O_MINI, GEMINI, GROQ_QWEN]])
+        chains = chains_by_role(pm, dict(pm.DEFAULTS, researcher=OPUS))
+        self.assertEqual(chains["researcher"], [[OPUS, HAIKU]])
+        chains = chains_by_role(pm, dict(pm.DEFAULTS, parser=OPUS))
+        self.assertEqual(chains["parser"], [[OPUS]])
 
 
 class ImportWiringTests(unittest.TestCase):
@@ -319,8 +268,8 @@ class ImportWiringTests(unittest.TestCase):
         return io.open(os.path.join(root, "main.py"), encoding="utf-8").read()
 
     def test_balanced_import_is_added_exactly_once_and_is_idempotent(self):
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-        pm.FORECAST_GRADE = frozenset({GEMINI})
+        pm = load(ANTHROPIC_API_KEY="k")
+        pm.FORECAST_GRADE = frozenset({HAIKU})
         once = pm.patch(self._main_src(), pm.DEFAULTS)
         self.assertIn("from backtest.balanced_llm import", once)
         self.assertEqual(once.count("from backtest.balanced_llm import"), 1)
@@ -336,9 +285,8 @@ class ImportWiringTests(unittest.TestCase):
         the generator has for emitting BalancedLlm.
         """
         for env in (
-            {"GEMINI_API_KEY": "a", "GROQ_API_KEY": "g"},
-            {"OPENROUTER_API_KEY": "o", "GEMINI_API_KEY": "a", "GROQ_API_KEY": "g"},
-            {},  # no fallback keys at all: single GeneralLlm per role
+            {"ANTHROPIC_API_KEY": "k"},
+            {},  # no key at all: single ClaudeLlm per role
         ):
             with self.subTest(env=sorted(env)):
                 pm = load(**env)
@@ -354,8 +302,8 @@ class ImportWiringTests(unittest.TestCase):
     def test_dropping_every_fallback_key_removes_the_balanced_import_again(self):
         """Converge-either-way: a source patched WITH the import must lose it
         when the keys that justified it are gone."""
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
-        pm.FORECAST_GRADE = frozenset({GEMINI})
+        pm = load(ANTHROPIC_API_KEY="k")
+        pm.FORECAST_GRADE = frozenset({HAIKU})
         balanced = pm.patch(self._main_src(), pm.DEFAULTS)
         self.assertIn("from backtest.balanced_llm import", balanced)
         pm = load()  # no fallback keys: nothing to balance or fall back to
@@ -389,7 +337,7 @@ class ImportWiringTests(unittest.TestCase):
                                  if isinstance(t, ast.Name))
             return names
 
-        pm = load(OPENROUTER_API_KEY="o", GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm = load(ANTHROPIC_API_KEY="k")
         generated = pm.patch(self._main_src(), pm.DEFAULTS)
         imports = [node for node in ast.parse(generated).body
                    if isinstance(node, ast.ImportFrom)
@@ -423,6 +371,9 @@ class SelftestAcrossCredentialSetsTests(unittest.TestCase):
 
     def test_no_credentials(self):
         self._run_selftest()
+
+    def test_the_anthropic_key_alone_as_every_workflow_has_it(self):
+        self._run_selftest(ANTHROPIC_API_KEY="k")
 
     def test_the_production_pin_step_combination(self):
         """The exact credential set the scoring workflows give the pin step.
@@ -485,7 +436,7 @@ class DriftTests(unittest.TestCase):
         the same reason. Checked against the real registry, not the copy."""
         from backtest import rate_limiter
 
-        pm = load(GEMINI_API_KEY="a", GROQ_API_KEY="g")
+        pm = load(ANTHROPIC_API_KEY="k")
         for primary in pm._ensemble_primaries(pm.DEFAULTS["default"]):
             self.assertIn(primary, rate_limiter.DEFAULT_LIMITS, primary)
 
@@ -509,9 +460,9 @@ if __name__ == "__main__":
 
 
 class ForecasterReasoningTests(unittest.TestCase):
-    """The forecast call asks Opus for high reasoning effort, and only it."""
+    """The forecast call asks Opus for xhigh effort, and only it."""
 
-    PRODUCTION = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="g", GROQ_API_KEY="q")
+    PRODUCTION = dict(ANTHROPIC_API_KEY="k")
 
     def _role_entry(self, block, role, next_role):
         return block[block.index('"{0}"'.format(role)):block.index('"{0}"'.format(next_role))]
@@ -520,31 +471,21 @@ class ForecasterReasoningTests(unittest.TestCase):
         pm = load(**self.PRODUCTION)
         default = self._role_entry(pm.build_block(pm.DEFAULTS), "default", "summarizer")
         opus_line = next(l for l in default.splitlines() if OPUS in l)
-        self.assertIn('extra_body={"reasoning": {"effort": "xhigh"}}', opus_line)
+        self.assertIn('effort="xhigh"', opus_line)
         self.assertIn("timeout={0}".format(pm.FORECASTER_TIMEOUT_SECONDS), opus_line)
 
-    def test_the_fallbacks_and_other_roles_are_unchanged(self):
+    def test_the_fallback_and_other_roles_ask_for_no_effort(self):
         pm = load(**self.PRODUCTION)
         block = pm.build_block(pm.DEFAULTS)
         default = self._role_entry(block, "default", "summarizer")
-        for line in default.splitlines():
-            if "GeneralLlm(" in line and OPUS not in line and GPT_SOL not in line:
-                self.assertNotIn("extra_body", line)
-        gpt_line = next(l for l in default.splitlines() if GPT_SOL in l)
-        self.assertIn('"effort": "high"', gpt_line)
-        rest = block[block.index('"summarizer"'):]
-        self.assertNotIn("extra_body", rest)
+        haiku_line = next(l for l in default.splitlines() if HAIKU in l)
+        self.assertNotIn("effort", haiku_line)
+        self.assertNotIn("effort", block[block.index('"summarizer"'):])
 
-    def test_without_fallback_keys_opus_still_gets_it(self):
+    def test_without_the_key_opus_still_gets_it(self):
         pm = load()
         default = self._role_entry(pm.build_block(pm.DEFAULTS), "default", "summarizer")
-        self.assertIn('"effort": "xhigh"', default)
-
-    def test_never_litellms_reasoning_effort(self):
-        """litellm 1.80.10 raises UnsupportedParamsError for reasoning_effort on
-        openrouter/ models, which would fail every Opus call over to Haiku."""
-        pm = load(**self.PRODUCTION)
-        self.assertNotIn("reasoning_effort", pm.build_block(pm.DEFAULTS))
+        self.assertIn('effort="xhigh"', default)
 
     def test_the_generated_block_still_parses(self):
         pm = load(**self.PRODUCTION)
@@ -564,36 +505,26 @@ class OpusEffortOverrideTests(unittest.TestCase):
         # behind would leak into any later test that builds a block.
         load()
 
-    def _lines(self, pm):
+    def _opus(self, pm):
         block = pm.build_block(pm.DEFAULTS)
         default = block[block.index('"default"'):block.index('"summarizer"')]
-        opus = next(l for l in default.splitlines() if OPUS in l)
-        sol = next(l for l in default.splitlines() if GPT_SOL in l)
-        return opus, sol
+        return next(l for l in default.splitlines() if OPUS in l)
 
     def test_unset_keeps_the_production_effort(self):
-        opus, _sol = self._lines(load(**self.PRODUCTION))
-        self.assertIn('"effort": "xhigh"', opus)
+        self.assertIn('effort="xhigh"', self._opus(load(**self.PRODUCTION)))
 
-    def test_the_override_reaches_opus_only(self):
+    def test_the_override_reaches_opus(self):
         pm = load(FORECASTER_REASONING_OPUS="high", **self.PRODUCTION)
-        opus, sol = self._lines(pm)
-        self.assertIn('extra_body={"reasoning": {"effort": "high"}}', opus)
-        self.assertIn('"effort": "high"', sol)
-        self.assertNotIn("max_tokens", pm.build_block(pm.DEFAULTS))
+        self.assertIn('effort="high"', self._opus(pm))
 
     def test_anything_but_an_effort_name_is_ignored(self):
-        """A token budget returns 400 on Opus 5.5 and would fail every Opus
-        call over to Sol or Haiku in silence."""
         import io
 
         for value in ("4000", "max", "high; drop", "XHIGH "):
             warned = io.StringIO()
             with contextlib.redirect_stderr(warned):
-                opus, _sol = self._lines(load(FORECASTER_REASONING_OPUS=value, **self.PRODUCTION))
-            # Every one of these keeps (or names) the production "xhigh";
-            # only the invalid ones warn.
-            self.assertIn('"effort": "xhigh"', opus, value)
+                opus = self._opus(load(FORECASTER_REASONING_OPUS=value, **self.PRODUCTION))
+            self.assertIn('effort="xhigh"', opus, value)
             invalid = value.strip().lower() not in ("low", "medium", "high", "xhigh")
             self.assertEqual("::warning::" in warned.getvalue(), invalid, value)
 

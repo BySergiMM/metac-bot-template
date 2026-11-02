@@ -308,6 +308,7 @@ class ConfigurationTests(unittest.TestCase):
         guarding provenance, not ordering."""
         import backtest.pin_models as pin
         verified = {
+            "anthropic/claude-haiku-5-5",          # every research call since 2026-10-18
             "gemini/gemini-3.5-flash-lite",        # run 32293364075
             "groq/openai/gpt-oss-120b",            # run 32293364075
             "openrouter/anthropic/claude-haiku-4.5",  # run 34457071209
@@ -352,11 +353,9 @@ class ConfigurationTests(unittest.TestCase):
             chain = [primary] + pin._fallbacks_for("parser")
             self.assertEqual(chain[0], primary)
             self.assertEqual(len(chain), len(set(chain)), chain)
-            self.assertGreaterEqual(
-                len(chain), 3,
-                "the parser lost five questions on 2026-09-08 with an effective "
-                "depth of one; it must stay deeper than that",
-            )
+            # Depth one on purpose since 2026-11-03: there is one key, the owner's,
+            # and Haiku is on it. It fails only when everything else would.
+            self.assertEqual(chain, ["anthropic/claude-haiku-5-5"])
         finally:
             pin.ACTIVE_FALLBACKS = []
             pin.ACTIVE_PARSER_EXTRA = []
@@ -437,8 +436,8 @@ class MetricInvarianceTests(unittest.TestCase):
         import pathlib as _p
         return (_p.Path(__file__).parent.parent / "main.py").read_text()
 
-    def test_J_predictions_per_research_report_is_still_five(self):
-        self.assertIn("predictions_per_research_report=5,", self._main_py())
+    def test_J_predictions_per_research_report_comes_from_the_budget_plan(self):
+        self.assertIn("predictions_per_research_report=spend.PRIZE_FORECASTS,", self._main_py())
         self.assertIn("research_reports_per_question=1,", self._main_py())
 
     def test_I_threshold_is_untouched(self):

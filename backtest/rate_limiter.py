@@ -81,6 +81,10 @@ class ProviderLimits:
 # Keyed by the model string as it appears in the llms= block, which is exactly
 # the granularity Gemini meters on.
 DEFAULT_LIMITS: dict[str, ProviderLimits] = {
+    # The owner's Anthropic key. Unthrottled here: the SDK retries a 429 itself,
+    # and it is the only key, so waiting has nothing to fail over to.
+    "anthropic/claude-opus-5-5": ProviderLimits(),
+    "anthropic/claude-haiku-5-5": ProviderLimits(),
     "gemini/gemini-3.5-flash-lite": ProviderLimits(
         requests_per_minute=15.0,          # measured: quotaValue "15"
         tokens_per_minute=None,            # not the binding meter for Gemini

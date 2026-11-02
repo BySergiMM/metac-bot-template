@@ -98,7 +98,7 @@ class SecondPassTests(unittest.TestCase):
         self.assertIn("template_bot.second_research = second_research", tail[fe:mb])
         self.assertIn("template_bot.second_research = False", tail[mb:mb + 200])
         self.assertIn("template_bot.second_research = second_research", tail[mp:mp + 200])
-        self.assertIn('os.getenv("SECOND_RESEARCH", "on") != "off"', tail)
+        self.assertIn('os.getenv("SECOND_RESEARCH", "off") == "on"', tail)
         self.assertIn("spend.room_for_extras()", tail)
 
 

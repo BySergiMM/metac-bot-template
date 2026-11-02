@@ -161,18 +161,17 @@ import sys
 # per question and summarise rather than judge. All five forecast calls go to
 # the forecaster (see FORECAST_GRADE for why the cheap fallbacks no longer
 # vote), which costs more per question and is where the score is decided.
+#
+# ONLY THE ANTHROPIC KEY -- owner's decision, 2026-11-03. On 2026-10-25 the
+# sponsored OpenRouter key hit its limit and the chain below had Gemini Flash
+# Lite forecasting in Opus's place for nine days, unnoticed. Everything now runs
+# on the Claude credit through backtest.claude_llm.ClaudeLlm. main.py chooses per
+# tournament whether the forecaster is Opus or Haiku; the budget is what decides.
 DEFAULTS = {
-    "default": "openrouter/anthropic/claude-opus-5.5",
-    "researcher": "openrouter/anthropic/claude-haiku-4.5",
-    "summarizer": "openrouter/anthropic/claude-haiku-4.5",
-    # Claude since 2026-10-22. gpt-4o-mini led the parser until it lost
-    # question 46224 (three of five numeric answers parsed as 1/1000 of what
-    # the forecasters wrote, Test Bot run 39565436454) and one of five
-    # forecasts on question 46191 (run 39596139823); every other model answered
-    # all 379 calls of the 60 runs before it. Haiku 4.5 was already the
-    # parser's verified fallback. gpt-4o-mini stays behind it, for outages
-    # only (PARSER_EXTRA_CHAIN).
-    "parser": "openrouter/anthropic/claude-haiku-4.5",
+    "default": "anthropic/claude-opus-5-5",
+    "researcher": "anthropic/claude-haiku-5-5",
+    "summarizer": "anthropic/claude-haiku-5-5",
+    "parser": "anthropic/claude-haiku-5-5",
 }
 
 # Fallback chain behind each role's own model, tried in order only on
@@ -191,12 +190,9 @@ DEFAULTS = {
 #   Cerebras  402 "Payment required to access this resource" - no free tier
 #   Metaculus 400 "You don't have an allowance for model <gpt-4o-mini>"
 FALLBACK_CHAIN = [
-    # Haiku leads the fallbacks: same provider and key as the primary, so it
-    # is the closest substitute when Opus fails. It no longer votes in the
-    # forecaster ensemble; see FORECAST_GRADE.
-    ("openrouter/anthropic/claude-haiku-4.5", "OPENROUTER_API_KEY"),
-    ("gemini/gemini-3.5-flash-lite", "GEMINI_API_KEY"),
-    ("groq/openai/gpt-oss-120b", "GROQ_API_KEY"),
+    # Same key as the primary: it covers Opus failing or overloaded, not the
+    # credit running out. There is deliberately nothing behind it.
+    ("anthropic/claude-haiku-5-5", "ANTHROPIC_API_KEY"),
 ]
 
 # Which of those can serve the PARSER. The parser is the one role whose output
@@ -217,6 +213,7 @@ FALLBACK_CHAIN = [
 # groq/openai/gpt-oss-120b still stays out of the parser chain, on its own
 # evidence, and stays in the reasoning chain where prose is what we want.
 STRUCTURED_OUTPUT_CAPABLE = {
+    "anthropic/claude-haiku-5-5",
     "gemini/gemini-3.5-flash-lite",
     "groq/qwen/qwen3.8-27b",
     # Both verified in the catalogue sweep, run 34457071209, by the same probe
@@ -257,18 +254,7 @@ STRUCTURED_OUTPUT_CAPABLE = {
 # So "Groq cannot emit structured output" was true of the model tested and
 # false of the provider. One measurement of one model had been carried forward
 # as if it settled the question.
-PARSER_EXTRA_CHAIN = [
-    # The parser's primary until 2026-10-22 (see DEFAULTS); behind Haiku now,
-    # so an OpenRouter-side Anthropic outage still has a JSON backend on the
-    # same key.
-    ("openrouter/openai/gpt-4o-mini", "OPENROUTER_API_KEY"),
-    # Qualified during the OpenRouter outage and kept afterwards: it is the one
-    # Groq model that emits schema-constrained JSON, and a third reachable
-    # parser backend is exactly what was missing when five questions were lost
-    # on 2026-09-08. It sits AFTER the funded backends because it rate-limited
-    # 43 times in run 34412589779 when it had to carry the role alone.
-    ("groq/qwen/qwen3.8-27b", "GROQ_API_KEY"),
-]
+PARSER_EXTRA_CHAIN: list[tuple[str, str]] = []
 
 
 def _parser_primary(configured: str) -> str:
@@ -376,6 +362,8 @@ ACTIVE_ASKNEWS = _asknews_credential_present(os.environ)
 # Groq's measured 8000 TPM cap.
 RATE_LIMITED_MODELS = frozenset(
     {
+        "anthropic/claude-haiku-5-5",
+        "anthropic/claude-opus-5-5",
         "asknews/news-summaries",
         "gemini/gemini-3.5-flash-lite",
         "groq/openai/gpt-oss-120b",
@@ -438,6 +426,7 @@ TRIES_STANDALONE = 3
 # for the OpenRouter endpoint). The cheap fallbacks and the other roles are left
 # as they were. Thinking takes longer, hence the larger timeout.
 FORECASTER_REASONING = {
+    "anthropic/claude-opus-5-5": "xhigh",
     # "xhigh" since 2026-10-24: see "IS OPUS ACTUALLY REASONING?" below.
     "openrouter/anthropic/claude-opus-5.5": "xhigh",
     "openrouter/openai/gpt-5.6-sol": "high",
@@ -464,7 +453,7 @@ FORECASTER_TIMEOUT_SECONDS = 420
 # Opus 5.5, which would fail every Opus call over to Sol or Haiku without an
 # error anywhere, so anything outside this list is ignored with a warning.
 # Read once, at import time, for the reason ACTIVE_FALLBACKS is.
-OPUS_FORECASTER = "openrouter/anthropic/claude-opus-5.5"
+OPUS_FORECASTER = "anthropic/claude-opus-5-5"
 OPUS_EFFORTS = ("low", "medium", "high", "xhigh")
 _OPUS_EFFORT_OVERRIDE = os.environ.get("FORECASTER_REASONING_OPUS", "").strip().lower()
 if _OPUS_EFFORT_OVERRIDE in OPUS_EFFORTS:
@@ -484,6 +473,11 @@ def _backend_expr(
     """One GeneralLlm(...) call, single line, for use inside a FallbackLlm list
     or standalone."""
     effort = FORECASTER_REASONING.get(model) if role == "default" else None
+    if model.startswith("anthropic/"):
+        if effort:
+            return (f'ClaudeLlm(model="{model}", effort="{effort}", '
+                    f"timeout={FORECASTER_TIMEOUT_SECONDS}, allowed_tries={allowed_tries})")
+        return f'ClaudeLlm(model="{model}", timeout={TIMEOUT_SECONDS}, allowed_tries={allowed_tries})'
     if effort:
         return (
             f'GeneralLlm(model="{model}", temperature=0.3, '
@@ -596,9 +590,7 @@ FORECAST_GRADE: frozenset[str] = frozenset()
 # M tokens, openrouter.ai/api/v1/models) -- splitting the five calls between
 # them costs what five Opus calls did. Gemini 3.1 Pro was tried in the same
 # run and failed with an upstream Google quota error, so it is not here.
-FORECAST_VOTERS = [
-    ("openrouter/openai/gpt-5.6-sol", "OPENROUTER_API_KEY"),
-]
+FORECAST_VOTERS: list[tuple[str, str]] = []  # no other key since 2026-11-03
 ACTIVE_VOTERS = [(m, e) for m, e in FORECAST_VOTERS if os.getenv(e)]
 
 
@@ -775,6 +767,7 @@ def read_overrides(path: pathlib.Path) -> dict[str, str]:
 IMPORT_ANCHOR = "silence_noisy_dependencies()\n"
 IMPORT_LINE = "from backtest.fallback_llm import FallbackLlm\n"
 BALANCED_IMPORT_LINE = "from backtest.balanced_llm import BalancedLlm\n"
+CLAUDE_IMPORT_LINE = "from backtest.claude_llm import ClaudeLlm\n"
 
 
 def _wants_fallback_wrapper() -> bool:
@@ -801,6 +794,12 @@ def _ensure_fallback_import(src: str, wants_balanced: bool = False) -> str:
     passed in rather than recomputed here because only the caller knows the
     resolved model names, and the ensemble's shape depends on them (see
     _ensemble_primaries)."""
+    if CLAUDE_IMPORT_LINE not in src:
+        if IMPORT_ANCHOR not in src:
+            raise LookupError(
+                "import anchor not found in main.py; upstream template changed"
+            )
+        src = src.replace(IMPORT_ANCHOR, IMPORT_ANCHOR + CLAUDE_IMPORT_LINE, 1)
     has_import = IMPORT_LINE in src
     wants_import = _wants_fallback_wrapper()
     if wants_import and not has_import:
@@ -929,6 +928,7 @@ def _eval_llms_dict(generated: str, active_fallbacks: list, models: dict[str, st
 
     namespace = {
         "GeneralLlm": _StubGeneralLlm,
+        "ClaudeLlm": _StubGeneralLlm,
         "FallbackLlm": _StubFallbackLlm,
         "BalancedLlm": _StubBalancedLlm,
     }

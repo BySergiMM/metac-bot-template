@@ -27,8 +27,6 @@ import unittest
 
 from tests._real_forecasting_tools import real_forecasting_tools
 from tests.test_pin_models_chains import (
-    GEMINI,
-    GROQ_OSS,
     HAIKU,
     chains_by_role,
     load,
@@ -36,7 +34,7 @@ from tests.test_pin_models_chains import (
 )
 
 ASKNEWS = "asknews/news-summaries"
-PRODUCTION = dict(OPENROUTER_API_KEY="o", GEMINI_API_KEY="g", GROQ_API_KEY="q")
+PRODUCTION = dict(ANTHROPIC_API_KEY="k")
 
 
 # ------------------------------------------------------------- generation
@@ -110,8 +108,7 @@ class GeneratedChainTests(unittest.TestCase):
         for label, env in (
             ("production", PRODUCTION),
             ("no keys at all", {}),
-            ("gemini and groq", dict(GEMINI_API_KEY="g", GROQ_API_KEY="q")),
-        ):
+                    ):
             with self.subTest(env=label):
                 pm = load(**env)
                 block = pm.build_block(pm.DEFAULTS)
@@ -120,7 +117,7 @@ class GeneratedChainTests(unittest.TestCase):
     def test_with_a_credential_the_researcher_leads_with_asknews(self):
         pm = load(ASKNEWS_API_KEY="k", **PRODUCTION)
         chains = chains_by_role(pm, pm.DEFAULTS)
-        self.assertEqual(chains["researcher"], [[ASKNEWS, HAIKU, GEMINI, GROQ_OSS]])
+        self.assertEqual(chains["researcher"], [[ASKNEWS, HAIKU]])
 
     def test_the_llm_researcher_is_the_first_fallback(self):
         """Research must degrade to exactly what it was, not to a different
@@ -195,7 +192,7 @@ class GeneratedChainTests(unittest.TestCase):
         which was already possible before this feature."""
         pm = load(ASKNEWS_API_KEY="k", **PRODUCTION)
         chains = chains_by_role(pm, dict(pm.DEFAULTS, researcher=ASKNEWS))
-        self.assertEqual(chains["researcher"], [[ASKNEWS, HAIKU, GEMINI, GROQ_OSS]])
+        self.assertEqual(chains["researcher"], [[ASKNEWS, HAIKU]])
 
     def test_the_asknews_bucket_key_is_registered(self):
         """FallbackLlm acquires a limiter keyed by the model string; an
