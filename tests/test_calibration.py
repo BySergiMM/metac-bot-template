@@ -75,6 +75,25 @@ class TimingTests(unittest.TestCase):
         self.assertNotIn("0.7", str(s["not_current"]))
 
 
+class BinaryCurveTests(unittest.TestCase):
+    def test_binaries_are_split_by_the_system_of_the_last_forecast(self):
+        c = cal.binary_curve([binary("no", 0.1), binary("yes", 0.3), binary("no", 0.3),
+                              binary("yes", 0.9, start=OLD), numeric("50"),
+                              binary("annulled", 0.5)])
+        self.assertEqual((c["new"]["n"], c["old"]["n"]), (3, 1))
+        self.assertAlmostEqual(c["new"]["share_yes"], 1 / 3)
+        self.assertAlmostEqual(c["new"]["brier"], (0.01 + 0.49 + 0.09) / 3)
+        self.assertAlmostEqual(c["new"]["brier_of_the_share"], 2 / 9)
+        low, mid = c["new"]["bins"][0], c["new"]["bins"][1]
+        self.assertEqual((low["n"], low["share_yes"]), (1, 0.0))
+        self.assertEqual((mid["n"], mid["share_yes"]), (2, 0.5))
+        self.assertEqual(c["old"]["bins"][4]["n"], 1)
+
+    def test_a_forecast_after_the_close_does_not_count(self):
+        q = binary("yes", 0.7, start="2026-10-26T00:00:00Z")
+        self.assertEqual(cal.binary_curve([q])["new"]["n"], 0)
+
+
 class LocationTests(unittest.TestCase):
     def test_linear_log_and_out_of_range(self):
         self.assertAlmostEqual(cal.location(numeric("25")), 0.25)

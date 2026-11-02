@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers; siblings = survey related open questions"
+        description: "fetch = dataset+report; diagnose = probe API access; smoke-test = probe candidate LLM providers; siblings = survey related open questions; calibration-curve = binaries, old system vs current"
         required: false
         default: "fetch"
         type: choice
-        options: ["fetch", "diagnose", "smoke-test", "siblings"]
+        options: ["fetch", "diagnose", "smoke-test", "siblings", "calibration-curve"]
       tournaments:
         description: "Tournaments forming the coverage denominator (space separated)"
         required: false
@@ -249,6 +249,12 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
         run: python research/siblings_survey.py
+
+      - name: Calibration of resolved binaries, old system against current
+        if: ${{ github.event.inputs.mode == 'calibration-curve' }}
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: python research/calibration_curve.py
 
       - name: Diagnose API access
         if: ${{ github.event.inputs.mode == 'diagnose' }}

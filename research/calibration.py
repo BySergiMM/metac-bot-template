@@ -47,9 +47,8 @@ def _parse(ts: Any) -> datetime | None:
     return out if out.tzinfo else out.replace(tzinfo=timezone.utc)
 
 
-def scored_forecast(question: dict[str, Any]) -> dict[str, Any] | None:
-    """The bot's last forecast made before the question closed, when the
-    current system made it; None otherwise."""
+def _last_before_close(question: dict[str, Any]) -> tuple[dict[str, Any] | None, datetime | None]:
+    """The bot's last forecast made before the question closed, and when."""
     history = ((question.get("my_forecasts") or {}).get("history")) or []
     close = _parse(question.get("actual_close_time")) or _parse(
         question.get("scheduled_close_time"))
@@ -62,6 +61,13 @@ def scored_forecast(question: dict[str, Any]) -> dict[str, Any] | None:
             continue
         if best_start is None or start > best_start:
             best, best_start = record, start
+    return best, best_start
+
+
+def scored_forecast(question: dict[str, Any]) -> dict[str, Any] | None:
+    """The bot's last forecast made before the question closed, when the
+    current system made it; None otherwise."""
+    best, best_start = _last_before_close(question)
     if best is None or best_start < NEW_SYSTEM_START:
         return None
     return best
@@ -203,6 +209,45 @@ def summarise(questions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "skipped": skipped,
         "not_current": not_current,
     }
+
+
+#: The coarse bins of binary_curve: few enough to hold several questions each.
+CURVE_BINS = ((0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0001))
+
+
+def binary_curve(questions: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Calibration of resolved binaries, split by the system that made the
+    last forecast before the close: per bin the count, mean forecast and share
+    resolved yes, plus the Brier score against that of always answering the
+    set's own share of yes (the question mix differs between the two)."""
+    rows: dict[str, list[tuple[float, float]]] = {"old": [], "new": []}
+    for q in questions:
+        resolution = str(q.get("resolution") or "").strip().lower()
+        if q.get("type") != "binary" or resolution not in ("yes", "no"):
+            continue
+        record, start = _last_before_close(q)
+        values = (record or {}).get("forecast_values")
+        if not isinstance(values, list) or len(values) != 2:
+            continue
+        rows["new" if start >= NEW_SYSTEM_START else "old"].append(
+            (float(values[1]), 1.0 if resolution == "yes" else 0.0))
+    out: dict[str, dict[str, Any]] = {}
+    for system, pairs in rows.items():
+        n = len(pairs)
+        rate = sum(y for _, y in pairs) / n if n else None
+        bins = []
+        for lo, hi in CURVE_BINS:
+            inside = [(p, y) for p, y in pairs if lo <= p < hi]
+            bins.append({"from": lo, "to": min(hi, 1.0), "n": len(inside),
+                         "mean_forecast": sum(p for p, _ in inside) / len(inside) if inside else None,
+                         "share_yes": sum(y for _, y in inside) / len(inside) if inside else None})
+        out[system] = {
+            "n": n, "share_yes": rate,
+            "mean_forecast": sum(p for p, _ in pairs) / n if n else None,
+            "brier": sum((p - y) ** 2 for p, y in pairs) / n if n else None,
+            "brier_of_the_share": rate * (1 - rate) if n else None,
+            "bins": bins}
+    return out
 
 
 def render(summary: dict[str, Any]) -> list[str]:
