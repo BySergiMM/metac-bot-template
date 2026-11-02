@@ -5,18 +5,17 @@ Replaces the per-question WhatsApp alerts (one message every time a question
 opened, which told the owner nothing about how the bot was doing). Sent once
 a week, Monday 09:00 Madrid, dispatched by Dagu on gl65.
 
-What it reports, per tournament the bot plays:
-  * leaderboard position and total score, with the change since last week
-    in positions and points -- never as a percentage: scores go negative,
-    and -10 -> +5 as "-150%" would read as a collapse;
-  * when Metaculus has no leaderboard yet, what can be measured instead:
-    questions forecast and resolved this week;
-  * coverage for FutureEval, MiniBench (current and previous round) and
-    Market Pulse: questions whose scheduled close fell in the week, and how
-    many of them carry no forecast of the bot's (roadmap A12; the same
-    audit research/health_check.py runs daily, over the week here);
-  * the current system's calibration on everything it has seen resolve,
-    aggregates only (research/calibration.py).
+The message (short on purpose, owner 2026-11-02): one line per tournament the
+bot played this week, with its leaderboard place and total score and the change
+since last week in positions and points -- never as a percentage: scores go
+negative, and -10 -> +5 as "-150%" would read as a collapse. Prize money when
+the bot's row has any. The workflow adds one line of Claude spend.
+
+Only in the log: questions forecast and resolved this week; coverage for
+FutureEval, MiniBench and Market Pulse (questions whose scheduled close fell in
+the week and carry no forecast of the bot's, roadmap A12; the same audit
+research/health_check.py runs daily, over the week here); and the current
+system's calibration, aggregates only (research/calibration.py).
 
 Read-only by construction: everything goes through MetaculusReadClient
 (GET only, raises on any other verb) with the bot's own token. The previous
@@ -67,11 +66,11 @@ def targets(today: date) -> list[Target]:
     rounds = (today - MINIBENCH_EPOCH).days // MINIBENCH_DAYS
     last_done = MINIBENCH_EPOCH + timedelta(days=MINIBENCH_DAYS * (rounds - 1))
     return [
-        Target("futureeval", "FutureEval ($50k)", str(tournaments.FUTUREEVAL.id)),
-        Target("minibench", "MiniBench (ronda actual)", "minibench"),
-        Target("minibench_prev", f"MiniBench {last_done:%d-%b}",
+        Target("futureeval", "FutureEval", str(tournaments.FUTUREEVAL.id)),
+        Target("minibench", "MiniBench", "minibench"),
+        Target("minibench_prev", f"MiniBench {last_done:%d/%m}",
                f"minibench-{last_done.isoformat()}"),
-        Target("market_pulse", "Market Pulse ($7,5k)", str(tournaments.MARKET_PULSE.id)),
+        Target("market_pulse", "Market Pulse", str(tournaments.MARKET_PULSE.id)),
         Target("cup", "Metaculus Cup", str(tournaments.METACULUS_CUP.id)),
     ]
 
@@ -235,55 +234,58 @@ def _delta_rank(now: int, before: int | None) -> str:
 def _delta_score(now: float | None, before: float | None) -> str:
     if now is None or before is None:
         return ""
-    diff = round(now - before, 1)
-    return " (=)" if diff == 0 else f" ({'▲' if diff > 0 else '▼'}{abs(diff):g})"
+    diff = round(now - before)
+    return " (=)" if diff == 0 else f" ({'▲' if diff > 0 else '▼'}{abs(diff)})"
 
 
 def _fmt_score(score: float | None) -> str:
-    return "?" if score is None else f"{score:+g} pts"
+    return "?" if score is None else f"{score:+.0f} pts"
 
 
-def _fmt_prize(standing: dict[str, Any]) -> str:
-    if standing.get("prize"):
-        return f" · 💰 {standing['prize']} $ si acabara hoy"
-    if standing.get("paid_ranks"):
-        gap = ""
-        if standing.get("paid_score") is not None and standing.get("score") is not None:
-            gap = f", a {standing['paid_score'] - standing['score']:.1f} pts"
-        return f" · sin premio (cobran hasta el {standing['paid_ranks']}{gap})"
-    return ""
+def _active(row: dict[str, Any]) -> bool:
+    act = row.get("activity") or {}
+    return bool(act.get("forecast") or act.get("resolved"))
 
 
-def render(week_start: date, week_end: date, rows: list[dict[str, Any]],
-           previous: dict[str, Any] | None,
-           calibration_summary: dict[str, Any] | None = None) -> str:
-    prev = (previous or {}).get("standings", {})
-    lines = [f"📊 Bot Metaculus · semana {week_start:%d/%m}–{week_end:%d/%m}", ""]
+def _shown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The tournaments the bot is playing, one row each. A live MiniBench
+    round has no table until it ends, so MiniBench shows the last finished
+    round instead while either of the two has activity."""
+    by_key = {r["key"]: r for r in rows}
+    live, done = by_key.get("minibench"), by_key.get("minibench_prev")
+    out = []
     for row in rows:
-        s, act = row.get("standing"), row.get("activity") or {}
-        if s:
-            p = prev.get(row["key"]) or {}
-            total = f"/{s['total']}" if s.get("total") else ""
-            lines.append(
-                f"• {row['label']}: puesto {s['rank']}{total}"
-                f"{_delta_rank(s['rank'], p.get('rank'))} · "
-                f"{_fmt_score(s.get('score'))}{_delta_score(s.get('score'), p.get('score'))}"
-                f"{_fmt_prize(s)}"
-            )
-        else:
-            lines.append(f"• {row['label']}: sin clasificación aún")
-        if act:
-            lines.append(f"   esta semana: {act.get('forecast', 0)} pronosticadas, "
-                         f"{act.get('resolved', 0)} resueltas")
-        cov = row.get("coverage")
-        if cov:
-            unchecked = f" ({cov['unchecked']} sin comprobar)" if cov.get("unchecked") else ""
-            lines.append(f"   cobertura 7 días: {cov['closed']} cerradas, "
-                         f"{cov['missing']} sin pronóstico{unchecked}")
-    if calibration_summary is not None:
-        lines += [""] + calibration.render(calibration_summary)
-    if not previous:
-        lines += ["", "(primera semana: sin comparativa todavía)"]
+        if row["key"] == "minibench_prev":
+            continue
+        if row["key"] == "minibench":
+            if live.get("standing") and _active(live):
+                out.append(live)
+            elif done and (_active(live) or _active(done)):
+                out.append(done)
+            elif _active(live):
+                out.append(live)
+        elif _active(row):
+            out.append(row)
+    return out
+
+
+def render(day: date, rows: list[dict[str, Any]], previous: dict[str, Any] | None) -> str:
+    """Owner, 2026-11-02: active tournaments only, name, place and points.
+    Coverage and calibration go to the log (build). Compares in positions
+    and points, never in percent: scores go negative. A MiniBench round is
+    its own table, so it is not compared with the round before."""
+    prev = (previous or {}).get("standings", {})
+    lines = [f"📊 Metaculus · {day:%d/%m}"]
+    for row in _shown(rows):
+        s = row.get("standing")
+        if not s:
+            lines.append(f"{row['label']}: sin clasificación aún")
+            continue
+        p = {} if row["key"].startswith("minibench") else prev.get(row["key"]) or {}
+        total = f"/{s['total']}" if s.get("total") else ""
+        prize = f" · 💰 {s['prize']} $" if s.get("prize") else ""
+        lines.append(f"{row['label']}: puesto {s['rank']}{total}{_delta_rank(s['rank'], p.get('rank'))}"
+                     f" · {_fmt_score(s.get('score'))}{_delta_score(s.get('score'), p.get('score'))}{prize}")
     return "\n".join(lines)
 
 
@@ -379,6 +381,9 @@ def build(client: MetaculusReadClient, today: date, log: Callable[[str], None] =
         f" skipped={calib and calib['skipped']}")
     for t in (calib or {}).get("not_current") or []:
         log("calibration_not_current " + " ".join(f"{k}={v}" for k, v in t.items()))
+    if calib is not None:
+        for line in calibration.render(calib):
+            log(line)
     return rows, week_start, week_end, calib
 
 
@@ -431,13 +436,13 @@ def main(argv: list[str] | None = None) -> int:
     today = datetime.now(timezone.utc).date()
     if args.dry_run:
         probe(client, today)
-    rows, week_start, week_end, calib = build(client, today)
+    rows, _week_start, week_end, _calib = build(client, today)
 
     previous = None
     if os.path.exists(args.state):
         with open(args.state, encoding="utf-8") as handle:
             previous = json.load(handle)
-    message = render(week_start, week_end, rows, previous, calib)
+    message = render(today, rows, previous)
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(message + "\n")
     print(message)

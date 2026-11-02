@@ -648,13 +648,19 @@ def main(argv: list[str]) -> int:
                     handle.write(f"changed={'true' if changed else 'false'}\n")
         elif command == "weekly":
             print(weekly_message(load(), datetime.now(timezone.utc)))
+        elif command == "month-line":
+            # One line for the Monday message; nothing without a history, which
+            # would read as no spend at all (a failed cache restore).
+            lines = load()
+            if history_start(lines) is not None:
+                print("Claude: " + month_line(lines, datetime.now(timezone.utc)))
         elif command == "breakdown":
             print(breakdown(load()))
         elif command == "merge" and len(argv) > 2:
             before, after = merge(ledger_path() or "spend_ledger.jsonl", argv[2])
             print(f"spend_merge lines_before={before} lines_after={after}")
         else:
-            print("usage: python spend.py after-run|weekly|breakdown|merge OTHER", file=sys.stderr)
+            print("usage: python spend.py after-run|weekly|month-line|breakdown|merge OTHER", file=sys.stderr)
             return 2
     except Exception as exc:  # noqa: BLE001 - never fail the job
         logger.warning("spend_%s_failed reason=%s", command or "cli", type(exc).__name__)

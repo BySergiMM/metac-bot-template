@@ -527,8 +527,25 @@ class WiringTests(unittest.TestCase):
         steps = yaml.safe_load(self.read(".github", "workflows", "weekly_report.yaml"))["jobs"]["report"]["steps"]
         ledger_steps = [s for s in steps if s.get("with", {}).get("path") == "spend_ledger.jsonl"]
         self.assertEqual([s["uses"] for s in ledger_steps], ["actions/cache/restore@v4"])
-        send = next(s for s in steps if s.get("name") == "Send the week's API spend")
-        self.assertTrue(send.get("continue-on-error"))
+        names = [s.get("name") for s in steps]
+        add = steps[names.index("Add the month's Claude spend")]
+        self.assertTrue(add.get("continue-on-error"))
+        self.assertIn("python spend.py month-line >> message.txt", add["run"])
+        # One message: the line goes in before the only send.
+        self.assertLess(names.index("Add the month's Claude spend"), names.index("Send on WhatsApp"))
+        self.assertEqual(sum("notify.py" in str(s.get("run")) for s in steps), 1)
+
+    def test_the_month_line_says_nothing_without_a_history(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(
+                os.environ, {"SPEND_LEDGER_PATH": os.path.join(folder, "ledger.jsonl")}):
+            with mock.patch("sys.stdout", io.StringIO()) as out:
+                spend.main(["spend.py", "month-line"])
+            self.assertEqual(out.getvalue(), "")
+            with open(os.environ["SPEND_LEDGER_PATH"], "w", encoding="utf-8") as h:
+                h.write(json.dumps({"t": "2026-10-01T00:00:00+00:00", "kind": "start"}) + "\n")
+            with mock.patch("sys.stdout", io.StringIO()) as out:
+                spend.main(["spend.py", "month-line"])
+            self.assertTrue(out.getvalue().startswith("Claude: mes "))
 
     def test_the_ledger_is_never_committed(self):
         self.assertIn("spend_ledger.jsonl", self.read(".gitignore"))
