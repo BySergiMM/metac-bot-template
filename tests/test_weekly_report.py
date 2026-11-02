@@ -55,12 +55,12 @@ class StandingTests(unittest.TestCase):
         s = wr.standing_from({"entries": rows})
         self.assertEqual((s["rank"], s.get("prize"), s["paid_ranks"]), (3, None, 2))
         self.assertEqual(s["paid_score"], 11.0)
-        self.assertIn("sin premio (cobran hasta el 2, a 6.0 pts)", wr._fmt_prize(s))
         rows[2]["prize"] = 37.6
         s = wr.standing_from({"entries": rows})
         self.assertEqual(s["prize"], 38)
-        self.assertIn("💰 38 $", wr._fmt_prize(s))
-        self.assertEqual(wr._fmt_prize({"rank": 1}), "")
+        row = {"key": "futureeval", "label": "FutureEval", "standing": s,
+               "activity": {"forecast": 1}}
+        self.assertIn("💰 38 $", wr.render(date(2026, 11, 2), [row], None))
 
     def test_an_empty_leaderboard_is_none(self):
         self.assertIsNone(wr.standing_from([{"is_primary_leaderboard": True, "entries": []}]))
@@ -119,32 +119,45 @@ class CalibrationPostTests(unittest.TestCase):
 
 
 class MessageTests(unittest.TestCase):
-    ROWS = [
-        {"key": "futureeval", "label": "FutureEval ($50k)",
-         "standing": {"rank": 41, "total": 180, "score": 85.0},
-         "activity": {"forecast": 7, "resolved": 2}},
-        {"key": "market_pulse", "label": "Market Pulse ($7,5k)", "standing": None,
-         "activity": {"forecast": 0, "resolved": 0}},
-    ]
+    DAY = date(2026, 11, 2)
+    FE = {"key": "futureeval", "label": "FutureEval",
+          "standing": {"rank": 41, "total": 180, "score": 85.0, "paid_ranks": 100, "paid_score": 50.0},
+          "activity": {"forecast": 7, "resolved": 2}, "coverage": {"closed": 7, "missing": 0}}
+    MP = {"key": "market_pulse", "label": "Market Pulse", "standing": {"rank": 9, "total": 90, "score": 5.0},
+          "activity": {"forecast": 0, "resolved": 0}}
+    LIVE = {"key": "minibench", "label": "MiniBench", "standing": None,
+            "activity": {"forecast": 3, "resolved": 0}}
+    DONE = {"key": "minibench_prev", "label": "MiniBench 19/10",
+            "standing": {"rank": 54, "total": 284, "score": 317.5, "prize": 12},
+            "activity": {"forecast": 0, "resolved": 0}}
 
-    def test_compares_in_positions_and_points_not_percent(self):
+    def test_one_short_line_per_tournament(self):
         prev = {"standings": {"futureeval": {"rank": 53, "total": 175, "score": 25.0}}}
-        msg = wr.render(date(2026, 10, 12), date(2026, 10, 18), self.ROWS, prev)
-        self.assertIn("puesto 41/180 (▲12)", msg)
-        self.assertIn("+85 pts (▲60)", msg)
-        self.assertNotIn("%", msg)
+        self.assertEqual(wr.render(self.DAY, [self.FE], prev),
+                         "📊 Metaculus · 02/11\nFutureEval: puesto 41/180 (▲12) · +85 pts (▲60)")
 
     def test_a_drop_shows_down_arrows(self):
         prev = {"standings": {"futureeval": {"rank": 30, "score": 120.0}}}
-        msg = wr.render(date(2026, 10, 12), date(2026, 10, 18), self.ROWS, prev)
+        msg = wr.render(self.DAY, [self.FE], prev)
         self.assertIn("(▼11)", msg)
         self.assertIn("(▼35)", msg)
 
-    def test_no_leaderboard_says_so_and_still_reports_activity(self):
-        msg = wr.render(date(2026, 10, 12), date(2026, 10, 18), self.ROWS, None)
-        self.assertIn("Market Pulse ($7,5k): sin clasificación aún", msg)
-        self.assertIn("esta semana: 7 pronosticadas, 2 resueltas", msg)
-        self.assertIn("primera semana", msg)
+    def test_a_tournament_without_activity_this_week_is_left_out(self):
+        self.assertNotIn("Market Pulse", wr.render(self.DAY, [self.FE, self.MP], None))
+
+    def test_minibench_shows_the_last_finished_round_with_its_prize_and_no_comparison(self):
+        prev = {"standings": {"minibench_prev": {"rank": 147, "total": 211, "score": -63.1}}}
+        msg = wr.render(self.DAY, [self.LIVE, self.DONE], prev)
+        self.assertEqual(msg.splitlines()[1:], ["MiniBench 19/10: puesto 54/284 · +318 pts · 💰 12 $"])
+
+    def test_a_tournament_being_played_without_a_table_says_so(self):
+        msg = wr.render(self.DAY, [{**self.LIVE}], None)
+        self.assertIn("MiniBench: sin clasificación aún", msg)
+
+    def test_nothing_about_coverage_or_activity_goes_in_the_message(self):
+        msg = wr.render(self.DAY, [self.FE], None)
+        for word in ("cobertura", "pronosticadas", "Calibración", "cobran"):
+            self.assertNotIn(word, msg)
 
 
 class CoverageTests(unittest.TestCase):
@@ -182,18 +195,6 @@ class CoverageTests(unittest.TestCase):
         until = datetime(2026, 10, 26, tzinfo=timezone.utc)
         self.assertEqual(wr.coverage(client, "33121", since, until),
                          {"closed": 2, "missing": 1, "unchecked": 0})
-
-    def test_the_report_carries_one_line_per_audited_tournament(self):
-        rows = [{"key": "futureeval", "label": "FutureEval ($50k)", "standing": None,
-                 "activity": {}, "coverage": {"closed": 23, "missing": 2, "unchecked": 0}},
-                {"key": "market_pulse", "label": "Market Pulse ($7,5k)", "standing": None,
-                 "activity": {}, "coverage": {"closed": 9, "missing": 0, "unchecked": 3}},
-                {"key": "cup", "label": "Metaculus Cup", "standing": None, "activity": {},
-                 "coverage": None}]
-        msg = wr.render(date(2026, 10, 19), date(2026, 10, 25), rows, None)
-        self.assertIn("   cobertura 7 días: 23 cerradas, 2 sin pronóstico", msg)
-        self.assertIn("   cobertura 7 días: 9 cerradas, 0 sin pronóstico (3 sin comprobar)", msg)
-        self.assertEqual(msg.count("cobertura 7 días"), 2)
 
     def test_build_audits_the_prize_tournaments_only(self):
         client = self.Client()

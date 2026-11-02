@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import math
 import unittest
-from datetime import date
 
 from research import calibration as cal
-from research import weekly_report as wr
 
 NEW = "2026-10-20T12:00:00Z"
 OLD = "2026-10-01T12:00:00Z"
@@ -163,14 +161,12 @@ class SummaryTests(unittest.TestCase):
                                    cdf=uniform_cdf(below=0.0, above=0.0))])
         self.assertIsNone(s["past_open_bound"])
 
-    def test_render_and_the_weekly_message(self):
+    def test_render(self):
         s = cal.summarise([numeric("50"), binary("no", 0.3)])
         lines = cal.render(s)
         self.assertIn("   binarias: 1 · Brier 0.090", lines)
         self.assertIn("dentro 25–75 100% (ideal 50%)", lines[-1])
         self.assertIn("masa fuera de límites abiertos 2.0%", lines[-1])
-        msg = wr.render(date(2026, 10, 26), date(2026, 11, 1), [], {"standings": {}}, s)
-        self.assertIn("Calibración del sistema actual", msg)
         self.assertEqual(cal.render(cal.summarise([]))[-1], "   aún ninguna")
 
 

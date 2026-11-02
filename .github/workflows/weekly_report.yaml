@@ -13,9 +13,11 @@ name: Weekly report (WhatsApp)
 # Last week's numbers live in the Actions cache (weekly_state.json). A dry
 # run prints the message and leaves both the cache and WhatsApp alone.
 #
-# A second message follows with the week's API spend, read from the ledger
+# One short message (owner, 2026-11-02): the tournaments being played, with
+# place and points, and one line of Claude spend read from the ledger
 # run_bot_on_tournament.yaml keeps in the same cache (spend.py). Read only:
-# this workflow never saves the ledger.
+# this workflow never saves the ledger. Calibration, coverage and the week's
+# spend in detail stay in this run's log.
 
 on:
   workflow_dispatch:
@@ -61,13 +63,6 @@ jobs:
           if [ "${DRY_RUN}" = "true" ]; then flags="--dry-run"; fi
           python research/weekly_report.py --state weekly_state.json --out message.txt $flags
 
-      - name: Send on WhatsApp
-        if: ${{ inputs.dry_run != true }}
-        env:
-          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
-          CALLMEBOT_PHONE_NUMBER: ${{ secrets.CALLMEBOT_PHONE_NUMBER }}
-        run: python scripts/notify.py whatsapp < message.txt
-
       - name: Restore the spend ledger
         continue-on-error: true
         uses: actions/cache/restore@v4
@@ -77,20 +72,24 @@ jobs:
           restore-keys: |
             spend-ledger-
 
-      - name: Send the week's API spend
+      - name: Add the month's Claude spend
         continue-on-error: true
         env:
           SPEND_LEDGER_PATH: spend_ledger.jsonl
           CLAUDE_BUDGET_USD: ${{ vars.CLAUDE_BUDGET_USD || '100' }}
           SPEND_THROTTLE_AT: ${{ vars.SPEND_THROTTLE_AT || '1.0' }}
           CLAUDE_BUDGET_CYCLE_DAY: ${{ vars.CLAUDE_BUDGET_CYCLE_DAY || '1' }}
-          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          python spend.py weekly
+          python spend.py month-line >> message.txt
+          cat message.txt
+
+      - name: Send on WhatsApp
+        if: ${{ inputs.dry_run != true }}
+        env:
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
           CALLMEBOT_PHONE_NUMBER: ${{ secrets.CALLMEBOT_PHONE_NUMBER }}
-        run: |
-          python spend.py weekly > spend_message.txt
-          cat spend_message.txt
-          if [ "${DRY_RUN}" != "true" ]; then python scripts/notify.py whatsapp < spend_message.txt; fi
+        run: python scripts/notify.py whatsapp < message.txt
 
       - name: Save this week's numbers
         if: ${{ inputs.dry_run != true }}
