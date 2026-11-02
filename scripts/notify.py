@@ -39,12 +39,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 CALLMEBOT_URL = "https://api.callmebot.com/whatsapp.php"
+#: The refusal itself, not any "error" or "invalid": the body can echo the text
+#: of the message.
+_REFUSED = re.compile(r"api\s*key\s+(is\s+)?(invalid|not)|invalid\s+api\s*key|not\s+activated", re.I)
 DEFAULT_TIMEOUT_SECONDS = 15.0
 
 
@@ -78,11 +82,13 @@ def send_whatsapp(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     base_url: str = CALLMEBOT_URL,
 ) -> None:
-    """One CallMeBot request. Raises `DeliveryError` on anything but a
-    request that completed without an HTTP error -- CallMeBot's success body
-    is plain text ("Message queued...", "Message sent...", wording has
-    changed over time), so this treats "no HTTP error" as the confirmation
-    rather than pattern-matching prose that can drift.
+    """One CallMeBot request. Raises `DeliveryError` on an HTTP error or on a
+    body that says it was refused. CallMeBot's success body is plain text
+    ("Message queued...", "Message sent...", wording has changed over time),
+    so a body that matches neither way counts as sent, as it always did; but
+    its refusals (a bad or lapsed API key, a number that needs activating) can
+    come with HTTP 200, which read as sent. The body is never printed: it could
+    echo the key.
     """
     if not message.strip():
         raise NotifyError("refusing to send an empty message")
@@ -91,13 +97,15 @@ def send_whatsapp(
     request = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            response.read()
+            body = response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         raise DeliveryError("CallMeBot returned HTTP {0}".format(exc.code)) from None
     except urllib.error.URLError as exc:
         raise DeliveryError("could not reach CallMeBot: {0}".format(exc.reason)) from None
     except (TimeoutError, OSError) as exc:
         raise DeliveryError("CallMeBot call failed: {0}".format(type(exc).__name__)) from None
+    if _REFUSED.search(body):
+        raise DeliveryError("CallMeBot refused the message (HTTP 200)")
 
 
 def _read_message(args: argparse.Namespace) -> str:

@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      test_send:
+        description: "Send this message on WhatsApp without updating last week's numbers"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -92,7 +97,7 @@ jobs:
         run: python scripts/notify.py whatsapp < message.txt
 
       - name: Save this week's numbers
-        if: ${{ inputs.dry_run != true }}
+        if: ${{ inputs.dry_run != true && inputs.test_send != true }}
         uses: actions/cache/save@v4
         with:
           path: weekly_state.json
