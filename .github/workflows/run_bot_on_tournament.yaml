@@ -40,7 +40,16 @@ on:
     # unverified guess. Reliable 5-minute detection is NOT achievable through
     # cron alone; what one delivered run buys is the poll loop in "Run bot"
     # below. See docs/cadence.md.
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+    #
+    # 2026-11-07: GitHub stopped running this fork's workflows "due to the
+    # scale of GitHub Actions usage" (banner on the Actions tab; every Dagu
+    # dispatch since got HTTP 422 "Actions has been disabled"). By then Dagu
+    # dispatched every 30 minutes and each run idled ~5 of its ~7 minutes in
+    # the poll loop below, on top of these 288 requested schedule events a
+    # day. Dagu is now the cadence; this cron is only the fallback that lets
+    # the health check notice a silent Dagu, so every three hours, off the
+    # hour, is enough.
+    - cron: "17 */3 * * *"
 
 # Least privilege: this job checks out the repo and calls external APIs. It
 # never writes to the repository, opens a PR or publishes a package. The
@@ -263,8 +272,14 @@ jobs:
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
-          # 40 minutes, not 3 hours. See the sizing note above the step.
-          POLL_WINDOW_SECONDS: "2400"
+          # One poll per run since 2026-11-11. Dagu (gl65) dispatches every
+          # 30 minutes, so polling inside a run only re-did that cadence while
+          # holding a runner: ~5 of each run's ~7 minutes were the sleep
+          # between two polls, ~5.5 runner-hours a day, and GitHub disabled
+          # the fork's workflows for the scale of its Actions usage (see the
+          # schedule note at the top). 0 makes the loop below run exactly one
+          # poll; the loop is kept for a manual longer window if ever needed.
+          POLL_WINDOW_SECONDS: "0"
           POLL_INTERVAL_SECONDS: "300"
           # Consecutive polls finding ZERO open questions before the window
           # ends early. Two, because one empty poll is normal between batches
