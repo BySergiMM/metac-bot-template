@@ -233,7 +233,19 @@ class SummerTemplateBot2026(ForecastBot):
     #: other key).
     cheap_forecast = False
 
+    #: The forecaster for the prize tournaments once the budget is spent
+    #: (spend.prize_forecasts() == 0): Sonnet 5.5 at high effort, not Haiku
+    #: (2026-11-16, leaders research: a weak model voting is what the top bots
+    #: avoid; Metaculus' template scored 476 with Sonnet 5.5 against 445 with
+    #: Opus 5.5 on the Fall 2026 FutureEval board, at half Opus's price).
+    #: None means the pinned forecaster.
+    forecaster_override = None
+
     def get_llm(self, purpose="default", guarantee_type=None):
+        if purpose == "default" and self.forecaster_override is not None:
+            if guarantee_type == "string_name":
+                return self.forecaster_override.model
+            return self.forecaster_override
         if purpose == "default" and self.cheap_forecast:
             purpose = "summarizer"
         return super().get_llm(purpose, guarantee_type)
@@ -255,13 +267,20 @@ class SummerTemplateBot2026(ForecastBot):
 
     ############################## DISAGREEMENT FOLLOW-UP ##############################
 
+    #: Off since 2026-11-16. It fired three times in its first five days and
+    #: widened the forecasters' spread every time (see the note in
+    #: _resolve_crux), and the leaders research found LLM judges and
+    #: disagreement loops null or worse (AIA, nostreambot, Metaculus). It cost
+    #: a crux research pass plus a second set of forecasts each time.
+    crux_enabled = False
+
     async def _research_and_make_predictions(self, question: MetaculusQuestion):
         """The SDK's research-then-five-forecasts, plus one targeted research
         pass and a fresh set of forecasts when the five disagree widely
         (disagreement.SPREAD_THRESHOLD). See disagreement.py for why."""
         result = await super()._research_and_make_predictions(question)
         values = [p.prediction_value for p in result.predictions]
-        if not (claude_research.enabled() and disagreement.needs_crux(values)):
+        if not (self.crux_enabled and claude_research.enabled() and disagreement.needs_crux(values)):
             return result
         pair = disagreement.extremes(result.predictions)
         if pair is None:
@@ -459,6 +478,18 @@ class SummerTemplateBot2026(ForecastBot):
                         type(exc).__name__,
                     )
                     research = ""
+                if not research:
+                    # One light retry before the researcher below, which
+                    # answers from the model's memory with no search
+                    # (2026-11-16): research that can read the news is worth
+                    # a second try; memory is the last resort, not the first.
+                    try:
+                        research = await claude_research.research(prompt, depth="light")
+                        logger.info("claude_research_retry ok=1")
+                    except Exception as exc:  # noqa: BLE001 - fall back, never fail
+                        logger.warning("claude_research_retry ok=0 reason=%s",
+                                       type(exc).__name__)
+                        research = ""
 
             if research:
                 pass
@@ -1281,12 +1312,22 @@ if __name__ == "__main__":
     opus_forecasts = spend.prize_forecasts()
     logger.info("prize_forecasts opus=%d", opus_forecasts)
 
+    def budget_forecaster():
+        # Imported as a module: pin_models owns the "from backtest.claude_llm
+        # import ClaudeLlm" line and adds or removes it with the llms= block.
+        from backtest import claude_llm
+
+        return claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER, effort="high", timeout=420)
+
     def forecast_with_opus() -> None:
-        template_bot.cheap_forecast = opus_forecasts == 0
+        # Over budget, the prize tournaments fall back to Sonnet, not Haiku.
+        template_bot.cheap_forecast = False
+        template_bot.forecaster_override = budget_forecaster() if opus_forecasts == 0 else None
         template_bot.predictions_per_research_report = opus_forecasts or spend.PRIZE_FORECASTS_TIGHT
 
     def forecast_with_haiku() -> None:
         template_bot.cheap_forecast = True
+        template_bot.forecaster_override = None
         template_bot.predictions_per_research_report = spend.PRIZE_FORECASTS
 
     forecast_with_opus()

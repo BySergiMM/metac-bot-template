@@ -195,6 +195,17 @@ FALLBACK_CHAIN = [
     ("anthropic/claude-haiku-5-5", "ANTHROPIC_API_KEY"),
 ]
 
+# The forecaster's own first fallback, ahead of FALLBACK_CHAIN, for the
+# "default" role only (2026-11-16, leaders research). A weak model voting as
+# an equal sample is what the top bots avoid: when Opus fails, Sonnet 5.5 at
+# high effort answers, and Haiku only if Sonnet fails too. On the Fall 2026
+# FutureEval board Metaculus' own template scored 476 with Sonnet 5.5 against
+# 445 with Opus 5.5, at half Opus's price. Research, summary and parsing keep
+# FALLBACK_CHAIN alone: they summarise, they are not scored.
+FORECASTER_FALLBACK = [
+    ("anthropic/claude-sonnet-5-5", "ANTHROPIC_API_KEY"),
+]
+
 # Which of those can serve the PARSER. The parser is the one role whose output
 # must be machine-readable: structure_output() requests a JSON schema and
 # raises when two samples disagree, so a backend that answers in prose turns a
@@ -364,6 +375,7 @@ RATE_LIMITED_MODELS = frozenset(
     {
         "anthropic/claude-haiku-5-5",
         "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5-5",
         "asknews/news-summaries",
         "gemini/gemini-3.5-flash-lite",
         "groq/openai/gpt-oss-120b",
@@ -426,8 +438,13 @@ TRIES_STANDALONE = 3
 # for the OpenRouter endpoint). The cheap fallbacks and the other roles are left
 # as they were. Thinking takes longer, hence the larger timeout.
 FORECASTER_REASONING = {
-    "anthropic/claude-opus-5-5": "xhigh",
-    # "xhigh" since 2026-10-24: see "IS OPUS ACTUALLY REASONING?" below.
+    "anthropic/claude-opus-5-5": "high",
+    # "high" again since 2026-11-16 (it was "xhigh" from 2026-10-24; see "IS
+    # OPUS ACTUALLY REASONING?" below). Metaculus validates its reference bots
+    # at "high", FutureSearch found Opus at xhigh no better than Fable 5 over
+    # ~1,900 questions, and no one measured xhigh beating high; high costs
+    # about $0.065 a question less over three forecasts.
+    "anthropic/claude-sonnet-5-5": "high",
     "openrouter/anthropic/claude-opus-5.5": "xhigh",
     "openrouter/openai/gpt-5.6-sol": "high",
 }
@@ -496,6 +513,9 @@ def _fallbacks_for(role: str) -> list[str]:
     Every role gets the full chain except the parser, which only gets backends
     verified to emit schema-constrained JSON."""
     models = [model for model, _env in ACTIVE_FALLBACKS]
+    if role == "default" and models:
+        # Same key as FALLBACK_CHAIN, so it is active exactly when that is.
+        return [m for m, _env in FORECASTER_FALLBACK] + models
     if role != "parser":
         return models
     capable = [m for m in models if m in STRUCTURED_OUTPUT_CAPABLE]

@@ -14,15 +14,16 @@ on:
         options: ["sonnet", "haiku"]
       opus_reasoning:
         # The Opus forecaster's effort for this run only (2026-10-23). The
-        # default is production's, "xhigh" since 2026-10-24; "high" is the
-        # old one, to compare the "reasoning ..." lines of the spend
-        # breakdown below. Effort names only: a token budget returns 400 on
-        # Opus 5.5 (see backtest/pin_models.py).
-        description: "Opus forecaster reasoning effort (xhigh = production | high)"
+        # default is production's, "high" again since 2026-11-16 (it was
+        # "xhigh" from 2026-10-24); "xhigh" is there to compare the
+        # "reasoning ..." lines of the spend breakdown below. Effort names
+        # only: a token budget returns 400 on Opus 5.5 (see
+        # backtest/pin_models.py).
+        description: "Opus forecaster reasoning effort (high = production | xhigh)"
         required: false
-        default: "xhigh"
+        default: "high"
         type: choice
-        options: ["xhigh", "high"]
+        options: ["high", "xhigh"]
 
 # Least privilege: this job calls external APIs and never writes to the
 # repository, opens a PR or publishes a package. Without this it inherits
