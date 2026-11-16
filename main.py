@@ -12,6 +12,7 @@ import claude_research
 import cp_pool
 import disagreement
 import resolution_spec
+import asknews_news
 import live_context
 import forecast_guards
 import numeric_shape
@@ -445,14 +446,27 @@ class SummerTemplateBot2026(ForecastBot):
     #: Pulse final -- set per tournament at the bottom of this file.
     resolution_spec = False
 
+    #: AskNews news as one more research section (asknews_news.py): "full"
+    #: (latest and archive) for FutureEval, "latest" for MiniBench and the
+    #: Market Pulse final, None elsewhere. Nothing happens without the
+    #: owner's AskNews credential in the repository secrets.
+    asknews_mode = None
+
     async def _run_research(self, question: MetaculusQuestion) -> str:
-        spec_task = None
+        spec_task = news_task = None
         if self.resolution_spec and claude_research.enabled():
             # Runs alongside the research below; a failure returns "".
             spec_task = asyncio.create_task(resolution_spec.build(
                 self._question_text(question), question.resolution_criteria or "",
                 question.fine_print or "", self._timing(question)))
+        if self.asknews_mode and asknews_news.enabled():
+            news_task = asyncio.create_task(asknews_news.news(
+                self._question_text(question), self.asknews_mode))
         body = await self._run_research_body(question)
+        if news_task is not None:
+            news = await news_task
+            if news:
+                body = f"{body}\n\n{news}" if body else news
         if spec_task is not None:
             spec = await spec_task
             if spec:
@@ -1360,6 +1374,7 @@ if __name__ == "__main__":
         template_bot.second_research = second_research
         forecast_with_opus()
         template_bot.resolution_spec = True
+        template_bot.asknews_mode = "full"
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.FUTUREEVAL.id, return_exceptions=True
@@ -1370,6 +1385,7 @@ if __name__ == "__main__":
         template_bot.second_research = False
         forecast_with_opus()
         template_bot.resolution_spec = True
+        template_bot.asknews_mode = "latest"
         minibench_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.MINIBENCH.id, return_exceptions=True
@@ -1426,6 +1442,7 @@ if __name__ == "__main__":
         template_bot.second_research = second_research
         forecast_with_opus()
         template_bot.resolution_spec = True
+        template_bot.asknews_mode = "latest"
         forecast_reports = asyncio.run(
             template_bot.forecast_questions(final, return_exceptions=True)
         ) if final else []
@@ -1433,6 +1450,7 @@ if __name__ == "__main__":
         template_bot.research_depth = other_depth
         template_bot.second_research = False
         template_bot.resolution_spec = False
+        template_bot.asknews_mode = None
         forecast_with_haiku()
         forecast_reports += asyncio.run(
             template_bot.forecast_questions(early, return_exceptions=True)

@@ -287,6 +287,13 @@ jobs:
           POLL_IDLE_LIMIT: "2"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # AskNews (asknews_news.py, 2026-11-16): free for FutureEval bot
+          # makers; unset secrets leave the bot as it was. Not in the pin step:
+          # there a credential would make AskNews the researcher (pin_models).
+          # The owner saved the key as the secret ASKNEWS (2026-11-16).
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY || secrets.ASKNEWS }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
               # before being wired in; absent keys simply disable their leg.
           # See the R11 note on the pin step above: one Gemini credential,
           # on purpose.
@@ -315,6 +322,13 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # AskNews (asknews_news.py, 2026-11-16): free for FutureEval bot
+          # makers; unset secrets leave the bot as it was. Not in the pin step:
+          # there a credential would make AskNews the researcher (pin_models).
+          # The owner saved the key as the secret ASKNEWS (2026-11-16).
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY || secrets.ASKNEWS }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
       # PRACTICE, NOT PRIZES. Metaculus Cup Fall 2026 (tournaments.METACULUS_CUP)
       # ranks bots against the human crowd but pays none; the FutureEval
       # resources page recommends it for measuring a bot on diverse questions.
@@ -344,6 +358,13 @@ jobs:
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # AskNews (asknews_news.py, 2026-11-16): free for FutureEval bot
+          # makers; unset secrets leave the bot as it was. Not in the pin step:
+          # there a credential would make AskNews the researcher (pin_models).
+          # The owner saved the key as the secret ASKNEWS (2026-11-16).
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY || secrets.ASKNEWS }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
       # One WhatsApp alert the first time a month crosses each threshold of
       # the Claude-API budget, and this run's spend in the step summary. Never
       # fails the job (spend.py swallows its own errors; continue-on-error is
