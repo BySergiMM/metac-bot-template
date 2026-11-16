@@ -1338,30 +1338,38 @@ if __name__ == "__main__":
     elif run_mode == "market_pulse":
         # Pays bots, but spot scored at each question's close, so "forecast
         # once when first seen" would leave a stale forecast standing at the
-        # one instant that counts. market_pulse.select does the skipping
-        # (new questions, plus a refresh shortly before close), so the bot's
-        # own skip is lifted for this mode only.
+        # one instant that counts. market_pulse.split does the skipping (new
+        # questions, a refresh in the last 36 hours, one final forecast in the
+        # last FINAL_WINDOW), so the bot's own skip is lifted for this mode.
+        #
+        # Only the final forecast is scored, so it alone gets Opus and full
+        # research (owner, 2026-11-16); the earlier ones are a Haiku safety
+        # net, with light research, that stands only if the final one never
+        # runs. Before, a question could go through Opus three or four times.
         template_bot.skip_previously_forecasted_questions = False
-        spend.set_tournament("market_pulse")
-        template_bot.second_research = second_research
-        forecast_with_opus()
         # The final forecast pooled with the revealed human community
         # prediction (cp_pool.py), at the weight in MP_CP_POOL_WEIGHT; unset
         # or 0 leaves it off.
         template_bot.cp_pool_weight = cp_pool.weight_from_env()
         # A listing without the CP is followed by GET /posts/{id}/ (cp_pool).
         template_bot.cp_pool_fetch = cp_pool.detail_fetcher(client)
-        forecast_reports = asyncio.run(
-            template_bot.forecast_questions(
-                market_pulse.select(
-                    client.get_all_open_questions_from_tournament(
-                        tournaments.MARKET_PULSE.id
-                    ),
-                    datetime.now(timezone.utc),
-                ),
-                return_exceptions=True,
-            )
+        final, early = market_pulse.split(
+            client.get_all_open_questions_from_tournament(tournaments.MARKET_PULSE.id),
+            datetime.now(timezone.utc),
         )
+        spend.set_tournament("market_pulse")
+        template_bot.second_research = second_research
+        forecast_with_opus()
+        forecast_reports = asyncio.run(
+            template_bot.forecast_questions(final, return_exceptions=True)
+        ) if final else []
+        spend.set_tournament("market_pulse_early")
+        template_bot.research_depth = other_depth
+        template_bot.second_research = False
+        forecast_with_haiku()
+        forecast_reports += asyncio.run(
+            template_bot.forecast_questions(early, return_exceptions=True)
+        ) if early else []
     elif run_mode == "test_questions":
         # The bot-testing-area tournament contains all question types and is
         # the recommended target for smoke-testing your bot.

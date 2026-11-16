@@ -56,16 +56,18 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(market_pulse.select([q], NOW), [])
 
     def test_a_last_forecast_is_made_just_before_close(self):
-        q = Q(True, close_time=ahead(5), timestamp_of_my_last_forecast=ago(4))
+        q = Q(True, close_time=ahead(3), timestamp_of_my_last_forecast=ago(4))
         self.assertEqual(market_pulse.select([q], NOW), [q])
 
-    def test_the_last_forecast_is_not_repeated_hourly(self):
-        q = Q(True, close_time=ahead(5), timestamp_of_my_last_forecast=ago(2))
+    def test_the_last_forecast_is_made_once(self):
+        """A forecast already made inside the final window is the final one;
+        the next runs (every 30 minutes) leave it."""
+        q = Q(True, close_time=ahead(3), timestamp_of_my_last_forecast=ago(0.5))
         self.assertEqual(market_pulse.select([q], NOW), [])
 
     def test_the_final_window_edges_are_inclusive(self):
         q = Q(True, close_time=NOW + market_pulse.FINAL_WINDOW,
-              timestamp_of_my_last_forecast=NOW - market_pulse.FINAL_MIN_AGE)
+              timestamp_of_my_last_forecast=ago(0.1))
         self.assertEqual(market_pulse.select([q], NOW), [q])
 
     def test_the_window_edges_are_inclusive(self):
@@ -190,13 +192,44 @@ class WiringTests(unittest.TestCase):
         start = src.index('elif run_mode == "market_pulse":')
         end = src.index('elif run_mode == "test_questions":')
         branch = src[start:end]
-        self.assertIn("market_pulse.select(", branch)
+        self.assertIn("market_pulse.split(", branch)
         self.assertIn("forecast_questions(", branch)
         self.assertNotIn("forecast_on_tournament(", branch)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitTests(unittest.TestCase):
+    """Only the forecast standing at close is scored, so only it gets Opus."""
+
+    def test_the_final_forecast_is_the_opus_one(self):
+        final = Q(True, close_time=ahead(3), timestamp_of_my_last_forecast=ago(20))
+        refresh = Q(True, close_time=ahead(20), timestamp_of_my_last_forecast=ago(24 * 5))
+        new_far = Q(False, close_time=ahead(24 * 10))
+        self.assertEqual(market_pulse.split([final, refresh, new_far], NOW),
+                         ([final], [new_far, refresh]))
+
+    def test_a_new_question_already_inside_the_window_is_final(self):
+        q = Q(False, close_time=ahead(2))
+        self.assertEqual(market_pulse.split([q], NOW), ([q], []))
+
+    def test_nothing_due_is_nothing(self):
+        q = Q(True, close_time=ahead(24 * 10), timestamp_of_my_last_forecast=ago(24))
+        self.assertEqual(market_pulse.split([q], NOW), ([], []))
+
+    def test_main_gives_opus_to_the_final_and_haiku_to_the_rest(self):
+        with io.open(os.path.join(ROOT, "main.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        branch = src[src.index('elif run_mode == "market_pulse":'):
+                     src.index('elif run_mode == "test_questions":')]
+        opus = branch.index("forecast_with_opus()")
+        haiku = branch.index("forecast_with_haiku()")
+        self.assertLess(opus, branch.index("forecast_questions(final"))
+        self.assertLess(branch.index("forecast_questions(final"), haiku)
+        self.assertLess(haiku, branch.index("forecast_questions(early"))
+        self.assertIn('spend.set_tournament("market_pulse_early")', branch[:haiku])
 
 
 class LabelFixRefreshTests(unittest.TestCase):

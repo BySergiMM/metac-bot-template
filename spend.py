@@ -489,7 +489,7 @@ def short_model(name: str) -> str:
 
 TOURNAMENT_NAMES = {
     "futureeval": "FutureEval", "minibench": "MiniBench", "cup": "Cup",
-    "market_pulse": "Market Pulse", "test": "Pruebas",
+    "market_pulse": "Market Pulse", "market_pulse_early": "Market Pulse (seguro)", "test": "Pruebas",
 }
 SPANISH_MONTHS = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
 
