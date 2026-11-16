@@ -11,6 +11,7 @@ import dotenv
 import claude_research
 import cp_pool
 import disagreement
+import resolution_spec
 import live_context
 import forecast_guards
 import numeric_shape
@@ -437,7 +438,28 @@ class SummerTemplateBot2026(ForecastBot):
         return (f"{main}\n\n## Second, independent research pass "
                 f"(searched separately for the facts that would decide the question)\n{second}")
 
+    #: Resolution forensics before the research (2026-11-16, leaders
+    #: research): one Haiku request that pins down what resolves the question
+    #: and reads its resolution source in full (resolution_spec.py). On for
+    #: the forecasts that are scored -- FutureEval, MiniBench, the Market
+    #: Pulse final -- set per tournament at the bottom of this file.
+    resolution_spec = False
+
     async def _run_research(self, question: MetaculusQuestion) -> str:
+        spec_task = None
+        if self.resolution_spec and claude_research.enabled():
+            # Runs alongside the research below; a failure returns "".
+            spec_task = asyncio.create_task(resolution_spec.build(
+                self._question_text(question), question.resolution_criteria or "",
+                question.fine_print or "", self._timing(question)))
+        body = await self._run_research_body(question)
+        if spec_task is not None:
+            spec = await spec_task
+            if spec:
+                return f"{spec}\n\n{body}" if body else spec
+        return body
+
+    async def _run_research_body(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             research = ""
             researcher = self.get_llm("researcher")
@@ -1337,6 +1359,7 @@ if __name__ == "__main__":
         template_bot.research_depth = prize_depth
         template_bot.second_research = second_research
         forecast_with_opus()
+        template_bot.resolution_spec = True
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.FUTUREEVAL.id, return_exceptions=True
@@ -1346,6 +1369,7 @@ if __name__ == "__main__":
         template_bot.research_depth = other_depth
         template_bot.second_research = False
         forecast_with_opus()
+        template_bot.resolution_spec = True
         minibench_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.MINIBENCH.id, return_exceptions=True
@@ -1401,12 +1425,14 @@ if __name__ == "__main__":
         spend.set_tournament("market_pulse")
         template_bot.second_research = second_research
         forecast_with_opus()
+        template_bot.resolution_spec = True
         forecast_reports = asyncio.run(
             template_bot.forecast_questions(final, return_exceptions=True)
         ) if final else []
         spend.set_tournament("market_pulse_early")
         template_bot.research_depth = other_depth
         template_bot.second_research = False
+        template_bot.resolution_spec = False
         forecast_with_haiku()
         forecast_reports += asyncio.run(
             template_bot.forecast_questions(early, return_exceptions=True)
