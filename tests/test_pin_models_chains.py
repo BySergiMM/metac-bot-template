@@ -225,15 +225,16 @@ class ChainsNameEachBackendOnceTests(unittest.TestCase):
                         )
 
     def test_the_production_chains_are_exactly_these_and_in_this_order(self):
-        """Opus forecasts with Haiku behind it; the rest is Haiku. Nothing from
-        another provider, so nothing can stand in for Opus unnoticed on a key
-        nobody is watching (the failure of 2026-10-25)."""
+        """Opus forecasts with Sonnet then Haiku behind it (Sonnet since
+        2026-11-16); the rest is Haiku. Nothing from another provider, so
+        nothing can stand in for Opus unnoticed on a key nobody is watching
+        (the failure of 2026-10-25)."""
         pm = load(**self.PRODUCTION)
         chains = chains_by_role(pm, pm.DEFAULTS)
         self.assertEqual(chains["researcher"], [[HAIKU]])
         self.assertEqual(chains["summarizer"], [[HAIKU]])
         self.assertEqual(chains["parser"], [[HAIKU]])
-        self.assertEqual(chains["default"], [[OPUS, HAIKU]])
+        self.assertEqual(chains["default"], [[OPUS, "anthropic/claude-sonnet-5-5", HAIKU]])
 
     def test_the_cheap_fallback_never_votes_in_the_forecaster_ensemble(self):
         pm = load(**self.PRODUCTION)
@@ -460,18 +461,19 @@ if __name__ == "__main__":
 
 
 class ForecasterReasoningTests(unittest.TestCase):
-    """The forecast call asks Opus for xhigh effort, and only it."""
+    """The forecast call asks Opus (and its Sonnet fallback) for high effort;
+    Haiku and the other roles for none."""
 
     PRODUCTION = dict(ANTHROPIC_API_KEY="k")
 
     def _role_entry(self, block, role, next_role):
         return block[block.index('"{0}"'.format(role)):block.index('"{0}"'.format(next_role))]
 
-    def test_opus_forecasts_with_xhigh_effort_and_a_longer_timeout(self):
+    def test_opus_forecasts_with_high_effort_and_a_longer_timeout(self):
         pm = load(**self.PRODUCTION)
         default = self._role_entry(pm.build_block(pm.DEFAULTS), "default", "summarizer")
         opus_line = next(l for l in default.splitlines() if OPUS in l)
-        self.assertIn('effort="xhigh"', opus_line)
+        self.assertIn('effort="high"', opus_line)
         self.assertIn("timeout={0}".format(pm.FORECASTER_TIMEOUT_SECONDS), opus_line)
 
     def test_the_fallback_and_other_roles_ask_for_no_effort(self):
@@ -485,7 +487,18 @@ class ForecasterReasoningTests(unittest.TestCase):
     def test_without_the_key_opus_still_gets_it(self):
         pm = load()
         default = self._role_entry(pm.build_block(pm.DEFAULTS), "default", "summarizer")
-        self.assertIn('effort="xhigh"', default)
+        self.assertIn('effort="high"', default)
+
+    def test_sonnet_backs_opus_up_before_haiku(self):
+        """A failed Opus call goes to Sonnet 5.5 at high effort first; Haiku
+        is the last rung (2026-11-16)."""
+        pm = load(**self.PRODUCTION)
+        default = self._role_entry(pm.build_block(pm.DEFAULTS), "default", "summarizer")
+        sonnet = "anthropic/claude-sonnet-5-5"
+        self.assertLess(default.index(OPUS), default.index(sonnet))
+        self.assertLess(default.index(sonnet), default.index(HAIKU))
+        sonnet_line = next(l for l in default.splitlines() if sonnet in l)
+        self.assertIn('effort="high"', sonnet_line)
 
     def test_the_generated_block_still_parses(self):
         pm = load(**self.PRODUCTION)
@@ -511,11 +524,11 @@ class OpusEffortOverrideTests(unittest.TestCase):
         return next(l for l in default.splitlines() if OPUS in l)
 
     def test_unset_keeps_the_production_effort(self):
-        self.assertIn('effort="xhigh"', self._opus(load(**self.PRODUCTION)))
+        self.assertIn('effort="high"', self._opus(load(**self.PRODUCTION)))
 
     def test_the_override_reaches_opus(self):
-        pm = load(FORECASTER_REASONING_OPUS="high", **self.PRODUCTION)
-        self.assertIn('effort="high"', self._opus(pm))
+        pm = load(FORECASTER_REASONING_OPUS="xhigh", **self.PRODUCTION)
+        self.assertIn('effort="xhigh"', self._opus(pm))
 
     def test_anything_but_an_effort_name_is_ignored(self):
         import io
@@ -524,7 +537,8 @@ class OpusEffortOverrideTests(unittest.TestCase):
             warned = io.StringIO()
             with contextlib.redirect_stderr(warned):
                 opus = self._opus(load(FORECASTER_REASONING_OPUS=value, **self.PRODUCTION))
-            self.assertIn('effort="xhigh"', opus, value)
+            expected = value.strip().lower() if value.strip().lower() in ("low", "medium", "high", "xhigh") else "high"
+            self.assertIn('effort="{0}"'.format(expected), opus, value)
             invalid = value.strip().lower() not in ("low", "medium", "high", "xhigh")
             self.assertEqual("::warning::" in warned.getvalue(), invalid, value)
 
@@ -549,7 +563,7 @@ class OpusEffortOverrideTests(unittest.TestCase):
             flow = yaml.safe_load(text)
             # PyYAML reads the bare key `on:` as True.
             choice = (flow.get("on") or flow.get(True))["workflow_dispatch"]["inputs"]["opus_reasoning"]
-            self.assertEqual((choice["default"], choice["options"]), ("xhigh", ["xhigh", "high"]))
+            self.assertEqual((choice["default"], choice["options"]), ("high", ["high", "xhigh"]))
             steps = flow["jobs"]["forecast_job"]["steps"]
             setters = [s.get("name") for s in steps if "FORECASTER_REASONING_OPUS" in (s.get("env") or {})]
             self.assertEqual(setters, ["Pin and verify LLM models"])

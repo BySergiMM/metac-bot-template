@@ -463,6 +463,10 @@ def prize_forecasts(now: datetime | None = None) -> int:
     return PRIZE_FORECASTS
 
 
+#: The prize tournaments' forecaster once over budget (main.budget_forecaster):
+#: Sonnet 5.5 at high effort, about half Opus's price, instead of Haiku.
+BUDGET_FORECASTER = "anthropic/claude-sonnet-5-5"
+
 #: Where the forecasters should be Opus while there is budget.
 OPUS_TOURNAMENTS = ("futureeval", "market_pulse", "minibench")
 

@@ -271,6 +271,34 @@ class MainWiringTests(unittest.TestCase):
         self.assertIn("forecast_with_haiku()", self.tail[cup - 120:cup])
         self.assertIn("forecast_with_opus()", self.tail[mp:mp + 200])
 
+    def test_over_budget_the_prize_tournaments_forecast_with_sonnet(self):
+        """spend.prize_forecasts() == 0 used to hand the prize tournaments to
+        Haiku; since 2026-11-16 they get Sonnet 5.5 at high effort."""
+        body = self.tail[self.tail.index("def forecast_with_opus()"):self.tail.index("def forecast_with_haiku()")]
+        self.assertIn("template_bot.cheap_forecast = False", body)
+        self.assertIn("budget_forecaster() if opus_forecasts == 0 else None", body)
+        self.assertIn('claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER, effort="high"', self.tail)
+        self.assertEqual(spend.BUDGET_FORECASTER, "anthropic/claude-sonnet-5-5")
+        haiku = self.tail[self.tail.index("def forecast_with_haiku()"):]
+        self.assertIn("template_bot.forecaster_override = None", haiku[:300])
+
+    def test_the_override_comes_before_the_cheap_switch(self):
+        src = self.src[self.src.index("    def get_llm(self"):]
+        src = src[:src.index("return super().get_llm")]
+        self.assertLess(src.index("self.forecaster_override is not None"),
+                        src.index("self.cheap_forecast"))
+        self.assertIn('if guarantee_type == "string_name":\n                return self.forecaster_override.model', src)
+
+    def test_the_crux_pass_is_off(self):
+        self.assertIn("    crux_enabled = False\n", self.src)
+        self.assertIn("if not (self.crux_enabled and claude_research.enabled()", self.src)
+
+    def test_failed_research_is_retried_light_before_memory(self):
+        start = self.src.index("claude_research_failed reason=%s falling_back=true")
+        retry = self.src.index('claude_research.research(prompt, depth="light")', start)
+        memory = self.src.index("research = await researcher.invoke(prompt)", start)
+        self.assertLess(retry, memory)
+
     def test_the_cheap_forecaster_is_the_summarizers_model(self):
         self.assertIn('if purpose == "default" and self.cheap_forecast:\n            purpose = "summarizer"',
                       self.src)
