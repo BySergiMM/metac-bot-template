@@ -29,15 +29,15 @@ logger = logging.getLogger(__name__)
 
 REFRESH_WINDOW = timedelta(hours=36)
 MIN_AGE = timedelta(hours=18)
-#: One more forecast just before close (owner, 2026-10-23: Market Pulse is
-#: one of the two tournaments the budget goes to). With MIN_AGE alone the
-#: forecast standing at close could be 18 hours old -- a long time for share
-#: prices and earnings expectations. Dagu launches a run every 30 minutes and
-#: skips while one is still going, so runs arrive about hourly: a question
-#: closing within FINAL_WINDOW whose forecast is FINAL_MIN_AGE old is redone,
-#: which leaves the scored forecast at most ~6 hours old.
-FINAL_WINDOW = timedelta(hours=6)
-FINAL_MIN_AGE = timedelta(hours=3)
+#: The forecast that is scored (owner, 2026-10-23: Market Pulse is one of the
+#: tournaments the budget goes to). Only the forecast standing at close counts,
+#: so since 2026-11-16 it is the one Opus forecast a question gets
+#: (main.py, via split()): a question closing within FINAL_WINDOW that has no
+#: forecast made inside that window is forecast once more, and only once.
+#: Dagu dispatches every 30 minutes, so it lands about 3.5 hours before close.
+#: Everything earlier -- the first forecast, the 36-hour refresh -- is a cheap
+#: safety net that stands only if the final one never happens.
+FINAL_WINDOW = timedelta(hours=4)
 
 #: Forecasts made before this moment were produced without the group option
 #: in the prompt (main._question_text), so a group subquestion was forecast
@@ -83,13 +83,31 @@ def select(questions: Sequence[Any], now: datetime) -> list[Any]:
         if close is None or last is None:
             continue
         left, age = close - now, now - last
-        if (left <= REFRESH_WINDOW and age >= MIN_AGE) or (left <= FINAL_WINDOW and age >= FINAL_MIN_AGE):
+        final_due = left <= FINAL_WINDOW and last < close - FINAL_WINDOW
+        if (left <= REFRESH_WINDOW and age >= MIN_AGE) or final_due:
             refresh.append(question)
     logger.info(
         "market_pulse_selection open=%d new=%d refresh=%d",
         len(questions), len(new), len(refresh),
     )
     return new + refresh
+
+
+def is_final(question: Any, now: datetime) -> bool:
+    """Whether forecasting ``question`` now makes the forecast that stands at
+    its close: it closes within FINAL_WINDOW."""
+    close = _utc(question.close_time)
+    return close is not None and close - _utc(now) <= FINAL_WINDOW
+
+
+def split(questions: Sequence[Any], now: datetime) -> tuple[list[Any], list[Any]]:
+    """select(), split into the forecasts that will be scored (closing
+    within FINAL_WINDOW: Opus) and the safety net before them (Haiku)."""
+    chosen = select(questions, now)
+    final = [q for q in chosen if is_final(q, now)]
+    early = [q for q in chosen if not is_final(q, now)]
+    logger.info("market_pulse_split final=%d early=%d", len(final), len(early))
+    return final, early
 
 
 #: The Metaculus Cup is scored against the human crowd over each question's
