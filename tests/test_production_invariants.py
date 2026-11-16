@@ -635,8 +635,10 @@ class WorkflowInvariants(unittest.TestCase):
     def test_the_bot_gets_the_anthropic_key_and_no_other_llm_key(self):
         """Owner, 2026-11-03. On 2026-10-25 the sponsored OpenRouter key hit its
         limit and Gemini forecast in Opus's place for nine days, unnoticed."""
+        # AskNews is allowed back since 2026-11-16 (owner: "vamos con
+        # AskNews"): a free news source, not an LLM key; see
+        # test_asknews_reaches_the_forecasting_steps_but_never_the_pin_step.
         others = ("OPENROUTER_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY",
-                  "ASKNEWS_API_KEY", "ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET",
                   "PERPLEXITY_API_KEY", "EXA_API_KEY")
         for workflow in ("run_bot_on_tournament.yaml", "run_bot_on_metaculus_cup.yaml", "test_bot.yaml"):
             src = yaml_without_comments(".github", "workflows", workflow)
@@ -886,14 +888,34 @@ class WorkflowInvariants(unittest.TestCase):
                         name, sorted(present), sorted(names - present)),
                 )
                 for var in names:
+                    # ASKNEWS_API_KEY may also read the secret the owner named
+                    # ASKNEWS (2026-11-16).
+                    expected = ("ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY || secrets.ASKNEWS }}"
+                                if var == "ASKNEWS_API_KEY" else "{0}: ${{{{ secrets.{0} }}}}".format(var))
                     self.assertIn(
-                        "{0}: ${{{{ secrets.{0} }}}}".format(var), block,
+                        expected, block,
                         "{0}: {1} must come from the repository secret".format(
                             name, var),
                     )
                 checked += 1
-        # None since 2026-11-03: the bot gets the Anthropic key and no other.
-        self.assertEqual(checked, 0, "an AskNews credential is back in a workflow")
+        # The three forecasting steps of production since 2026-11-16
+        # (asknews_news.py); none from 2026-11-03 to then.
+        self.assertEqual(checked, 3)
+
+    def test_asknews_reaches_the_forecasting_steps_but_never_the_pin_step(self):
+        """With an AskNews credential at patch time pin_models makes AskNews
+        the researcher, replacing the LLM researcher; asknews_news.py adds
+        news beside the research instead, so the pin step must not see it."""
+        import yaml
+
+        with io.open(os.path.join(ROOT, ".github", "workflows", "run_bot_on_tournament.yaml"),
+                     encoding="utf-8") as handle:
+            steps = yaml.safe_load(handle)["jobs"]["forecast_job"]["steps"]
+        by_name = {s.get("name"): s for s in steps}
+        self.assertNotIn("ASKNEWS_API_KEY", by_name["Pin LLM models"].get("env") or {})
+        for name in ("Run bot", "Forecast Market Pulse questions (prize)",
+                     "Forecast new Metaculus Cup questions (practice)"):
+            self.assertIn("ASKNEWS_API_KEY", by_name[name]["env"], name)
 
     def test_every_workflow_that_can_publish_to_a_scored_tournament_pins_models(self):
         """Without pin_models, forecasting-tools assigns the researcher role to
