@@ -224,9 +224,19 @@ class DegradedAlertTests(PlanTests):
                    call(NOW, 0.01, model="claude-haiku-5-5", run="r9"), call(NOW, 0.1, run="r9"))
         self.assertEqual(self.after(), [])
 
-    def test_haiku_is_expected_in_minibench_and_the_cup_and_in_other_phases(self):
+    def test_haiku_forecasting_minibench_is_degraded(self):
+        """MiniBench pays and is on Opus since 2026-11-16."""
         self.write({"t": "2026-10-20T00:00:00+00:00", "kind": "start"},
-                   call(NOW, 0.01, tour="minibench", model="claude-haiku-5-5", run="r9"),
+                   call(NOW, 0.01, tour="minibench", model="claude-haiku-5-5", run="r9",
+                        phase="forecast"))
+        sent = self.after()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("sin Opus", sent[0])
+
+    def test_haiku_is_expected_in_the_cup_and_in_other_phases(self):
+        self.write({"t": "2026-10-20T00:00:00+00:00", "kind": "start"},
+                   call(NOW, 0.01, tour="minibench", model="claude-haiku-5-5", run="r9",
+                        phase="research"),
                    call(NOW, 0.01, tour="cup", model="claude-haiku-5-5", run="r9"),
                    call(NOW, 0.01, model="claude-haiku-5-5", run="r9", phase="research"))
         self.assertEqual(self.after(), [])
@@ -257,7 +267,7 @@ class MainWiringTests(unittest.TestCase):
         cup = self.tail.index('spend.set_tournament("cup")')
         mp = self.tail.index('spend.set_tournament("market_pulse")')
         self.assertIn("forecast_with_opus()", self.tail[fe:mb])
-        self.assertIn("forecast_with_haiku()", self.tail[mb:mb + 200])
+        self.assertIn("forecast_with_opus()", self.tail[mb:mb + 200])
         self.assertIn("forecast_with_haiku()", self.tail[cup - 120:cup])
         self.assertIn("forecast_with_opus()", self.tail[mp:mp + 200])
 

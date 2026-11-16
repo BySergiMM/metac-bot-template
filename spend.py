@@ -464,7 +464,7 @@ def prize_forecasts(now: datetime | None = None) -> int:
 
 
 #: Where the forecasters should be Opus while there is budget.
-OPUS_TOURNAMENTS = ("futureeval", "market_pulse")
+OPUS_TOURNAMENTS = ("futureeval", "market_pulse", "minibench")
 
 
 def degraded_forecasts(lines: list[dict], run_id: str | None) -> list[str]:

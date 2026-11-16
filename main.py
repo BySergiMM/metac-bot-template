@@ -1267,10 +1267,17 @@ if __name__ == "__main__":
                        and spend.room_for_extras())
     logger.info("second_research enabled=%d", int(second_research))
 
-    # Who forecasts, within the 100 EUR a month on the one key: Opus for the two
-    # tournaments that can pay (owner, 2026-10-23), as many forecasts as the
-    # budget's pace allows; Haiku for MiniBench and the Cup, and for everything
-    # once the budget is spent.
+    # Who forecasts, within the 100 EUR a month on the one key: Opus for the
+    # tournaments that pay -- FutureEval, Market Pulse and, since 2026-11-16,
+    # MiniBench -- as many forecasts as the budget's pace allows; Haiku for the
+    # unpaid Cup, and for everything once the budget is spent.
+    #
+    # MiniBench went back to Opus on 2026-11-16 (owner: "estamos bajando
+    # puntuaciones, y no puede ser eso"). Its round forecast by Opus and GPT
+    # (minibench-2026-10-19) scored +5.85 a question, 57th of 297; the next
+    # one, forecast by Gemini Flash Lite during the OpenRouter outage and then
+    # Haiku, scored -1.21 (48 Gemini rows -1.57, 11 Haiku rows +0.38). About
+    # four questions a day at ~$0.32 each with light research fits the budget.
     opus_forecasts = spend.prize_forecasts()
     logger.info("prize_forecasts opus=%d", opus_forecasts)
 
@@ -1297,7 +1304,7 @@ if __name__ == "__main__":
         spend.set_tournament("minibench")
         template_bot.research_depth = other_depth
         template_bot.second_research = False
-        forecast_with_haiku()
+        forecast_with_opus()
         minibench_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.MINIBENCH.id, return_exceptions=True
