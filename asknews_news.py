@@ -28,6 +28,13 @@ shared by the whole process. Credentials: ASKNEWS_API_KEY, or
 ASKNEWS_CLIENT_ID with ASKNEWS_SECRET (the SDK rejects both at once). Without
 them nothing happens. Never raises: "" on any failure. Article text is never
 logged (public repo).
+
+Paused from 2026-11-19 (PAUSED): the free Metaculus-bot tier is granted by
+hand on AskNews' Discord, and applications for the fall FutureEval closed
+(AskNews, 2026-11-04: they reopen on 1 January for the spring one). Our
+account is on the ordinary trial, spent since 2026-11-17 17:33Z, so every call
+failed and only added the 10-second spacing. Set PAUSED to False once the
+tier is granted.
 """
 
 from __future__ import annotations
@@ -48,6 +55,8 @@ STOP_ARCHIVE_AT = 800
 STOP_ALL_AT = 950
 CALLS = {"latest news": 1, "news knowledge": 5}
 SPACING_SECONDS = 10.5
+#: No call at all until the free tier is granted (see the module docstring).
+PAUSED = True
 N_LATEST = 8
 N_ARCHIVE = 10
 SUMMARY_CHARS = 600
@@ -143,7 +152,7 @@ async def news(query: str, mode: str | None, sdk_factory=None) -> str:
 
 async def _news(query: str, mode: str | None, sdk_factory) -> str:
     creds = credentials()
-    if not creds or not mode:
+    if PAUSED or not creds or not mode:
         return ""
     strategies = plan(mode, calls_this_month(spend.load(), datetime.now(timezone.utc)))
     if not strategies:
