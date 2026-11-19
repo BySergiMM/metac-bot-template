@@ -50,8 +50,11 @@ class Base(unittest.TestCase):
             os.environ.pop(var, None)
         self.nosleep = mock.patch.object(asknews_news, "SPACING_SECONDS", 0)
         self.nosleep.start()
+        self.unpaused = mock.patch.object(asknews_news, "PAUSED", False)
+        self.unpaused.start()
 
     def tearDown(self):
+        self.unpaused.stop()
         self.nosleep.stop()
         self.env.stop()
         self.dir.cleanup()
@@ -109,6 +112,21 @@ class NewsTests(Base):
         with mock.patch.dict(os.environ, {"ASKNEWS_API_KEY": ""}):
             self.assertEqual(self.run_news("full", ask), "")
         self.assertEqual(ask.calls, [])
+
+    def test_paused_nothing_is_called_or_counted(self):
+        ask = FakeAsk()
+        with mock.patch.object(asknews_news, "PAUSED", True):
+            self.assertEqual(self.run_news("full", ask), "")
+        self.assertEqual(ask.calls, [])
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_paused_in_production_until_the_tier_is_granted(self):
+        # 2026-11-19: the free tier reopens on 1 January; flip it then.
+        self.unpaused.stop()
+        try:
+            self.assertTrue(asknews_news.PAUSED)
+        finally:
+            self.unpaused.start()
 
     def test_over_the_allowance_nothing_is_called(self):
         self.ledger({"t": datetime.now(timezone.utc).isoformat(), "provider": "asknews",
