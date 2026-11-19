@@ -131,7 +131,13 @@ async def news(query: str, mode: str | None, sdk_factory=None) -> str:
     try:
         return await _news(query, mode, sdk_factory)
     except Exception as exc:  # noqa: BLE001 - a news failure costs only itself
-        logger.warning("asknews_failed reason=%s", type(exc).__name__)
+        # AskNews' own code and message say why (quota, plan, credentials);
+        # from 2026-11-17 17:33Z every call failed and "APIError" alone could
+        # not tell which. The detail is AskNews' text, never the credential.
+        code = getattr(exc, "code", "")
+        detail = " ".join(str(getattr(exc, "detail", "") or "").split())[:160]
+        logger.warning("asknews_failed reason=%s code=%s detail=%r",
+                       type(exc).__name__, code, detail)
         return ""
 
 
