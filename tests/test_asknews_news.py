@@ -117,6 +117,20 @@ class NewsTests(Base):
         self.assertEqual(self.run_news("full", ask), "")
         self.assertEqual(ask.calls, [])
 
+    def test_a_failure_logs_asknews_code_and_detail(self):
+        class Err(Exception):
+            code = 403011
+            detail = "Usage limit reached for your plan"
+
+        class Failing(FakeAsk):
+            async def search(self, **kwargs):
+                raise Err()
+
+        with self.assertLogs("asknews_news", level="WARNING") as logs:
+            self.assertEqual(self.run_news("latest", Failing()), "")
+        self.assertIn("code=403011", logs.output[0])
+        self.assertIn("Usage limit reached", logs.output[0])
+
     def test_a_failure_costs_only_the_news_and_is_still_counted(self):
         ask = FakeAsk(fail=True)
         self.assertEqual(self.run_news("latest", ask), "")
