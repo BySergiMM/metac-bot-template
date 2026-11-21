@@ -80,6 +80,31 @@ async def structure_output(*args, **kwargs):
         return await _sdk_structure_output(*args, **kwargs)
 
 
+def _qtype(question) -> str:
+    """The question's type as one log-safe word ("binary", "numeric"...)."""
+    name = getattr(question, "question_type", None) or type(question).__name__
+    name = str(name)
+    return name if name.replace("_", "").isalnum() and len(name) <= 32 else "other"
+
+
+def budget_forecaster():
+    """The prize tournaments' forecaster once over budget (spend.prize_forecasts
+    == 0): Sonnet 5.5 at high effort, then Haiku, through FallbackLlm like the
+    pinned forecaster. A bare ClaudeLlm here failed the sample outright on one
+    refusal or timeout, because SummerTemplateBot2026.get_llm hands the
+    override out as it is (2026-11-22)."""
+    # Imported as modules: pin_models owns the "from backtest.claude_llm import
+    # ClaudeLlm" and FallbackLlm lines and adds or removes them with the llms=
+    # block.
+    from backtest import claude_llm, fallback_llm
+
+    return fallback_llm.FallbackLlm([
+        claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER, effort="high", timeout=420),
+        # The same Haiku as the pinned chain's last link (pin_models.FALLBACK_CHAIN).
+        claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER_FALLBACK, timeout=180),
+    ])
+
+
 class SummerTemplateBot2026(ForecastBot):
     """
     This is the template bot for Summer 2026 Metaculus AI Tournament.
@@ -265,7 +290,17 @@ class SummerTemplateBot2026(ForecastBot):
 
     async def _make_prediction(self, question: MetaculusQuestion, research: str):
         with spend.phase("forecast"):
-            return await super()._make_prediction(question, research)
+            try:
+                return await super()._make_prediction(question, research)
+            except Exception as exc:
+                # The SDK gathers a failed forecast into a list of messages that
+                # the redaction drops whole, so which samples fail and why was
+                # unreadable (FutureEval 46627 lost two of three, 2026-11-22).
+                # The class and the question type only: an exception's message
+                # can carry the model's answer.
+                logger.warning("sample_failed type=%s qtype=%s",
+                               type(exc).__name__, _qtype(question))
+                raise
 
     ############################## DISAGREEMENT FOLLOW-UP ##############################
 
@@ -1345,21 +1380,21 @@ if __name__ == "__main__":
     # one, forecast by Gemini Flash Lite during the OpenRouter outage and then
     # Haiku, scored -1.21 (48 Gemini rows -1.57, 11 Haiku rows +0.38). About
     # four questions a day at ~$0.32 each with light research fits the budget.
+    #
+    # FutureEval and Market Pulse's final forecast get more forecasts than
+    # MiniBench (spend.WIDE_TOURNAMENTS, 2026-11-22), so "wide" is read once
+    # here with the rest of the plan: both counts come from the same ledger.
     opus_forecasts = spend.prize_forecasts()
-    logger.info("prize_forecasts opus=%d", opus_forecasts)
+    wide_forecasts = spend.prize_forecasts(tournament="futureeval")
+    logger.info("prize_forecasts opus=%d wide=%d", opus_forecasts, wide_forecasts)
 
-    def budget_forecaster():
-        # Imported as a module: pin_models owns the "from backtest.claude_llm
-        # import ClaudeLlm" line and adds or removes it with the llms= block.
-        from backtest import claude_llm
-
-        return claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER, effort="high", timeout=420)
-
-    def forecast_with_opus() -> None:
-        # Over budget, the prize tournaments fall back to Sonnet, not Haiku.
+    def forecast_with_opus(wide: bool = False) -> None:
+        # Over budget, the prize tournaments fall back to Sonnet, not Haiku,
+        # with the count of the tight plan.
         template_bot.cheap_forecast = False
         template_bot.forecaster_override = budget_forecaster() if opus_forecasts == 0 else None
-        template_bot.predictions_per_research_report = opus_forecasts or spend.PRIZE_FORECASTS_TIGHT
+        forecasts = wide_forecasts if wide else opus_forecasts
+        template_bot.predictions_per_research_report = forecasts or spend.PRIZE_FORECASTS_TIGHT
 
     def forecast_with_haiku() -> None:
         template_bot.cheap_forecast = True
@@ -1372,7 +1407,7 @@ if __name__ == "__main__":
         spend.set_tournament("futureeval")
         template_bot.research_depth = prize_depth
         template_bot.second_research = second_research
-        forecast_with_opus()
+        forecast_with_opus(wide=True)
         template_bot.resolution_spec = True
         template_bot.asknews_mode = "full"
         seasonal_tournament_reports = asyncio.run(
@@ -1440,7 +1475,7 @@ if __name__ == "__main__":
         )
         spend.set_tournament("market_pulse")
         template_bot.second_research = second_research
-        forecast_with_opus()
+        forecast_with_opus(wide=True)
         template_bot.resolution_spec = True
         template_bot.asknews_mode = "latest"
         forecast_reports = asyncio.run(

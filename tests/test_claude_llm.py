@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 import unittest
@@ -155,6 +156,54 @@ class InvokeTests(LedgerCase):
         self.run_llm(fake, two)
         self.assertEqual(fake.peak, 2)
 
+    def test_each_call_logs_its_counts_and_nothing_it_read_or_wrote(self):
+        fake = FakeAnthropic([reply(text="Secret rationale. Probability: 91%",
+                                    uncached=10, write=1000, read=2000, out=500)])
+        llm = ClaudeLlm(model="anthropic/claude-opus-5-5", effort="high")
+        with self.assertLogs("backtest.claude_llm", level="INFO") as logs:
+            self.run_llm(fake, lambda: llm.invoke("Secret prompt about the question"))
+        self.assertEqual(len(logs.output), 1)
+        line = logs.output[0]
+        usd = ((10 + 1.25 * 1000 + 0.05 * 2000) * 4.0 + 500 * 20.0) / 1e6
+        self.assertRegex(line, r"claude_llm model=claude-opus-5-5 effort=high in=3010 "
+                               r"cache_read=2000 out=500 usd=%.4f stop=end_turn secs=\d+\.\d$" % usd)
+        for text in ("Secret", "rationale", "Probability", "91%", "prompt"):
+            self.assertNotIn(text, line)
+
+    def test_a_refusal_is_logged_with_its_stop_reason(self):
+        fake = FakeAnthropic([reply(stop="refusal")])
+        llm = ClaudeLlm(model="anthropic/claude-sonnet-5-5")
+        with self.assertLogs("backtest.claude_llm", level="INFO") as logs:
+            with self.assertRaises(RuntimeError):
+                self.run_llm(fake, lambda: llm.invoke("prompt"))
+        self.assertIn("effort=none", logs.output[0])
+        self.assertIn("stop=refusal", logs.output[0])
+
+    def test_the_usage_line_survives_the_public_log_filter_unchanged(self):
+        from bot_helpers import RedactForecastContent
+
+        message = ("claude_llm model=claude-opus-5-5 effort=high in=24310 cache_read=23950 "
+                   "out=1840 usd=0.0478 stop=end_turn secs=31.4")
+        record = logging.LogRecord("backtest.claude_llm", logging.INFO, __file__, 1, message, (), None)
+        self.assertTrue(RedactForecastContent().filter(record))
+        self.assertEqual(record.getMessage(), message)
+
+    def test_a_model_without_a_price_raises_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "no price for claude-unknown-9"):
+            ClaudeLlm(model="anthropic/claude-unknown-9")
+
+    def test_fable_has_a_price_and_is_not_the_default(self):
+        """Fable 5.2: $8/$40 per M, cache hits $0.20/M (0.025x)."""
+        import claude_research
+
+        llm = ClaudeLlm(model="anthropic/claude-fable-5-2", effort="high")
+        self.assertIs(llm.engine, claude_research.ENGINES["fable"])
+        fake = FakeAnthropic([reply(uncached=10, write=1000, read=2000, out=500)])
+        self.run_llm(fake, lambda: llm.invoke("prompt"))
+        expected = ((10 + 1.25 * 1000 + 0.025 * 2000) * 8.0 + 500 * 40.0) / 1e6
+        self.assertAlmostEqual(self.lines()[-1]["usd"], expected, places=6)
+        self.assertNotEqual(claude_research.DEFAULT_ENGINE, "fable")
+
     def test_a_failed_first_call_releases_the_others(self):
         fake = FakeAnthropic([RuntimeError("overloaded"), reply()])
         llm = ClaudeLlm(model="anthropic/claude-opus-5-5")
@@ -183,20 +232,41 @@ class PlanTests(LedgerCase):
         self.write({"t": "2026-10-20T00:00:00+00:00", "kind": "start"},
                    *[call(start + timedelta(days=d), usd_per_day) for d in range(days)])
 
+    def counts(self):
+        return {tour: spend.prize_forecasts(NOW, tournament=tour)
+                for tour in (None, "futureeval", "market_pulse", "minibench")}
+
     def test_three_opus_forecasts_while_the_pace_fits(self):
         self.days(2.0)   # about $62 by the cycle's end
         self.assertEqual(spend.prize_forecasts(NOW), 3)
+
+    def test_five_for_futureeval_and_market_pulse_while_the_pace_fits(self):
+        self.days(2.0)
+        self.assertEqual(self.counts(),
+                         {None: 3, "futureeval": 5, "market_pulse": 5, "minibench": 3})
 
     def test_two_when_the_pace_would_end_over_budget(self):
         self.days(4.0)   # $40 so far, about $122 by the cycle's end
         self.assertEqual(spend.prize_forecasts(NOW), 2)
 
+    def test_three_for_futureeval_and_market_pulse_when_tight(self):
+        self.days(4.0)
+        self.assertEqual(self.counts(),
+                         {None: 2, "futureeval": 3, "market_pulse": 3, "minibench": 2})
+
     def test_none_once_the_budget_is_spent(self):
         self.days(9.5)   # $95, past the 0.9 throttle
         self.assertEqual(spend.prize_forecasts(NOW), 0)
+        self.assertEqual(set(self.counts().values()), {0})
 
     def test_no_ledger_keeps_opus_because_over_budget_cannot_tell(self):
         self.assertEqual(spend.prize_forecasts(NOW), 3)
+        self.assertEqual(spend.prize_forecasts(NOW, tournament="futureeval"), 5)
+
+    def test_the_wide_tournaments_are_futureeval_and_the_market_pulse_final(self):
+        self.assertEqual(spend.WIDE_FORECASTS, 5)
+        self.assertEqual(spend.WIDE_TOURNAMENTS, ("futureeval", "market_pulse"))
+        self.assertNotIn("market_pulse_early", spend.WIDE_TOURNAMENTS)
 
 
 class DegradedAlertTests(PlanTests):
@@ -266,18 +336,33 @@ class MainWiringTests(unittest.TestCase):
         mb = self.tail.index('spend.set_tournament("minibench")')
         cup = self.tail.index('spend.set_tournament("cup")')
         mp = self.tail.index('spend.set_tournament("market_pulse")')
-        self.assertIn("forecast_with_opus()", self.tail[fe:mb])
+        self.assertIn("forecast_with_opus(wide=True)", self.tail[fe:mb])
         self.assertIn("forecast_with_opus()", self.tail[mb:mb + 200])
         self.assertIn("forecast_with_haiku()", self.tail[cup - 120:cup])
-        self.assertIn("forecast_with_opus()", self.tail[mp:mp + 200])
+        self.assertIn("forecast_with_opus(wide=True)", self.tail[mp:mp + 200])
+
+    def test_five_for_futureeval_and_the_market_pulse_final_three_elsewhere(self):
+        """FutureEval and Market Pulse's final forecast read the wide count;
+        MiniBench and the Market Pulse safety net keep the narrow one."""
+        self.assertIn('wide_forecasts = spend.prize_forecasts(tournament="futureeval")', self.tail)
+        body = self.tail[self.tail.index("def forecast_with_opus("):self.tail.index("def forecast_with_haiku()")]
+        self.assertIn("forecasts = wide_forecasts if wide else opus_forecasts", body)
+        self.assertIn("predictions_per_research_report = forecasts or spend.PRIZE_FORECASTS_TIGHT", body)
+        mb = self.tail.index('spend.set_tournament("minibench")')
+        self.assertNotIn("wide=True", self.tail[mb:mb + 200])
+        early = self.tail.index('spend.set_tournament("market_pulse_early")')
+        self.assertIn("forecast_with_haiku()", self.tail[early:early + 400])
+        haiku = self.tail[self.tail.index("def forecast_with_haiku()"):]
+        self.assertIn("predictions_per_research_report = spend.PRIZE_FORECASTS\n", haiku[:400])
 
     def test_over_budget_the_prize_tournaments_forecast_with_sonnet(self):
         """spend.prize_forecasts() == 0 used to hand the prize tournaments to
         Haiku; since 2026-11-16 they get Sonnet 5.5 at high effort."""
-        body = self.tail[self.tail.index("def forecast_with_opus()"):self.tail.index("def forecast_with_haiku()")]
+        body = self.tail[self.tail.index("def forecast_with_opus("):self.tail.index("def forecast_with_haiku()")]
         self.assertIn("template_bot.cheap_forecast = False", body)
         self.assertIn("budget_forecaster() if opus_forecasts == 0 else None", body)
-        self.assertIn('claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER, effort="high"', self.tail)
+        self.assertIn('claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER, effort="high"', self.src)
+        self.assertIn("return fallback_llm.FallbackLlm([", self.src)
         self.assertEqual(spend.BUDGET_FORECASTER, "anthropic/claude-sonnet-5-5")
         haiku = self.tail[self.tail.index("def forecast_with_haiku()"):]
         self.assertIn("template_bot.forecaster_override = None", haiku[:300])

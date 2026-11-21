@@ -22,16 +22,27 @@ once, so none could read what another wrote. The first caller of a prompt goes
 alone and the others wait for it: their input then costs 0.05x instead of 1x on
 Opus, about half of what a question's three forecasts spend on input. A failed
 first call still releases the others.
+
+What each call cost
+-------------------
+Every call logs one line of counts (``claude_llm model=... usd=...``), never
+the prompt or the answer, so the cost of one Opus forecast is read off the
+log instead of worked out by subtracting research from a question's total
+(2026-11-22).
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+import time
 
 from forecasting_tools.ai_models.general_llm import GeneralLlm
 
 import claude_research
 import spend
+
+logger = logging.getLogger(__name__)
 
 MAX_TOKENS = 16000
 
@@ -50,7 +61,7 @@ class ClaudeLlm(GeneralLlm):
         self.effort = effort
         self.max_tokens = max_tokens
         self.request_timeout = timeout
-        self.engine = next(e for e in claude_research.ENGINES.values() if e.model == self.api_model)
+        self.engine = engine_for(self.api_model)
 
     async def invoke(self, prompt, system_prompt: str | None = None) -> str:
         key = (id(asyncio.get_running_loop()), hashlib.sha256(
@@ -74,6 +85,7 @@ class ClaudeLlm(GeneralLlm):
             extra = {"thinking": {"type": "adaptive"}, "output_config": {"effort": self.effort}}
         if system_prompt:
             extra["system"] = system_prompt
+        started = time.monotonic()
         async with anthropic.AsyncAnthropic(timeout=self.request_timeout) as client:
             response = await client.beta.messages.create(
                 model=self.api_model,
@@ -82,13 +94,34 @@ class ClaudeLlm(GeneralLlm):
                 cache_control=claude_research.CACHE,
                 **extra,
             )
+        secs = time.monotonic() - started
         tally = claude_research.Tally(self.engine)
         tally.add(response.usage)
         spend.record(provider="anthropic", model=self.api_model, usd=tally.usd,
                      tokens_in=tally.tokens_in, tokens_out=tally.out)
+        # Counts only: the repo is public and the question may be open. in=
+        # is every prompt token, cached or not, as in the spend ledger.
+        logger.info("claude_llm model=%s effort=%s in=%d cache_read=%d out=%d usd=%.4f stop=%s secs=%.1f",
+                    self.api_model, self.effort or "none", tally.tokens_in, tally.cache_read,
+                    tally.out, tally.usd, _word(response.stop_reason), secs)
         if response.stop_reason == "refusal":
             raise RuntimeError("claude refused")
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         if not text:
             raise RuntimeError(f"claude returned no text (stop_reason={response.stop_reason})")
         return text
+
+
+def engine_for(api_model: str) -> claude_research.Engine:
+    """The price row for this model. A model without one used to raise a bare
+    StopIteration from the constructor, which says nothing about why."""
+    for engine in claude_research.ENGINES.values():
+        if engine.model == api_model:
+            return engine
+    raise ValueError(f"no price for {api_model}")
+
+
+def _word(value) -> str:
+    """A stop reason as one log-safe token: "end_turn", "refusal"..."""
+    text = str(value) if value is not None else "none"
+    return text if text.replace("_", "").isalnum() and len(text) <= 32 else "other"

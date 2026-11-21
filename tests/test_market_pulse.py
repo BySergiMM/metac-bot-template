@@ -224,7 +224,8 @@ class SplitTests(unittest.TestCase):
             src = handle.read()
         branch = src[src.index('elif run_mode == "market_pulse":'):
                      src.index('elif run_mode == "test_questions":')]
-        opus = branch.index("forecast_with_opus()")
+        # The scored final forecast gets the wide count (spend.WIDE_TOURNAMENTS).
+        opus = branch.index("forecast_with_opus(wide=True)")
         haiku = branch.index("forecast_with_haiku()")
         self.assertLess(opus, branch.index("forecast_questions(final"))
         self.assertLess(branch.index("forecast_questions(final"), haiku)

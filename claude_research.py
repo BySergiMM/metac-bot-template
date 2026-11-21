@@ -85,6 +85,13 @@ ENGINES = {
     # per M, cache hits 0.05x (same pricing page).
     "opus": Engine("claude-opus-5-5", "web_search_20260209", 4.0 / 1e6, 20.0 / 1e6, False,
                    cache_read=0.05),
+    # Not used by default (2026-11-22): here so a ClaudeLlm or a research call
+    # can name Fable 5.2 without a code change. $8/$40 per M, cache hits
+    # $0.20/M, which is 0.025x (Claude API skill's model table, cached
+    # 2026-11-03; platform.claude.com/docs/en/about-claude/pricing is the live
+    # source). Takes the dynamic-filtering search and server-side fallbacks.
+    "fable": Engine("claude-fable-5-2", "web_search_20260209", 8.0 / 1e6, 40.0 / 1e6, True,
+                    cache_read=0.025),
 }
 #: Haiku since 2026-10-18. A/B on the same nine practice questions (Test Bot
 #: runs 39091393405 vs 39091407899): Sonnet $0.243/question, 5-13 searches,
@@ -103,6 +110,10 @@ DEFAULT_ENGINE = "haiku"
 ROUNDS = {
     ("sonnet", "full"): (8, 5),
     ("sonnet", "light"): (4,),
+    # Sonnet's plan, so CLAUDE_RESEARCH_ENGINE=fable runs rather than raising
+    # KeyError; nothing sets it yet.
+    ("fable", "full"): (8, 5),
+    ("fable", "light"): (4,),
     # Full is for FutureEval and Market Pulse only since 2026-10-23 (MiniBench
     # went light, which paid for it); 102 production calls at this plan
     # averaged 12 searches and $0.145. It was cut to (8, 4) for a day while
