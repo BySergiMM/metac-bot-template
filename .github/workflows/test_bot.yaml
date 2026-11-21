@@ -24,6 +24,18 @@ on:
         default: "high"
         type: choice
         options: ["high", "xhigh"]
+      forecaster:
+        # "fable" turns the forecaster boost on for this run (2026-11-22,
+        # spend.forecaster_boost): Fable 5.2 at high effort, five forecasts a
+        # question, falling back to Opus then Sonnet, up to $15 of Fable in
+        # this run's own ledger. Measure it here before production's
+        # FORECASTER_BOOST_* variables are set. Compare the
+        # "claude_llm model=claude-fable-5-2 ... usd=" lines.
+        description: "Forecaster (opus = production | fable = Fable 5.2 boost)"
+        required: false
+        default: "opus"
+        type: choice
+        options: ["opus", "fable"]
 
 # Least privilege: this job calls external APIs and never writes to the
 # repository, opens a PR or publishes a package. Without this it inherits
@@ -77,6 +89,16 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_RESEARCH_ENGINE: ${{ inputs.research_engine }}
+          # The forecaster input. Empty for "opus", which leaves the boost off.
+          # The far date is safe here: this job's ledger starts empty each run
+          # and is never saved, so the cap is per run. Fable is not pinged by
+          # the pin step above: it is not in the pinned chain, and a dead id
+          # only hands each sample to Opus (FallbackLlm), which the
+          # llm_failure lines show.
+          FORECASTER_BOOST_MODEL: ${{ inputs.forecaster == 'fable' && 'anthropic/claude-fable-5-2' || '' }}
+          FORECASTER_BOOST_UNTIL: ${{ inputs.forecaster == 'fable' && '2099-12-31' || '' }}
+          FORECASTER_BOOST_SAMPLES: ${{ inputs.forecaster == 'fable' && '5' || '' }}
+          FORECASTER_BOOST_MAX_USD: ${{ inputs.forecaster == 'fable' && '15' || '' }}
       # Breakdown of what this test run cost, in the log and the step summary.
       # No WhatsApp credentials reach this step, so it can never alert.
       - name: Spend of this run

@@ -427,13 +427,14 @@ class WorkflowInvariants(unittest.TestCase):
 
     def test_the_cup_step_gets_the_same_credentials_as_run_bot(self):
         """A key missing from one step shortens that step's fallback chain
-        with no error. The Cup drops only the poll settings and WhatsApp."""
+        with no error. The Cup drops only the poll settings, WhatsApp and the
+        forecaster boost (2026-11-22), which never forecasts the Cup."""
         steps = self._production_steps()
         run_env = set(steps["Run bot"][1]["env"])
         cup_env = set(steps[self.CUP_STEP][1]["env"])
         expected = {
             name for name in run_env
-            if not name.startswith(("POLL_", "CALLMEBOT_"))
+            if not name.startswith(("POLL_", "CALLMEBOT_", "FORECASTER_BOOST_"))
         }
         self.assertEqual(cup_env, expected)
         self.assertNotIn("GEMINI2_API_KEY", cup_env)

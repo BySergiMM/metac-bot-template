@@ -36,6 +36,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from typing import Callable
 
 from forecasting_tools.ai_models.general_llm import GeneralLlm
 
@@ -55,13 +56,22 @@ class ClaudeLlm(GeneralLlm):
     at that effort, and None leaves the model's default without thinking."""
 
     def __init__(self, model: str, effort: str | None = None, timeout: float = 180,
-                 max_tokens: int = MAX_TOKENS, allowed_tries: int = 1) -> None:
+                 max_tokens: int = MAX_TOKENS, allowed_tries: int = 1,
+                 gate: Callable[[], bool] | None = None,
+                 max_retries: int | None = None) -> None:
         super().__init__(model=model, temperature=None, timeout=timeout, allowed_tries=allowed_tries)
         self.api_model = model.partition("/")[2]
         self.effort = effort
         self.max_tokens = max_tokens
         self.request_timeout = timeout
         self.engine = engine_for(self.api_model)
+        #: Asked before every call; False raises instead of calling, so a
+        #: FallbackLlm asks its next model (the forecaster boost's dollar cap,
+        #: spend.boost_room, 2026-11-22). None calls always.
+        self.gate = gate
+        #: The SDK's own retries (by default it retries a timeout, a 429 or a
+        #: 5xx twice); None leaves its default.
+        self.max_retries = max_retries
 
     async def invoke(self, prompt, system_prompt: str | None = None) -> str:
         key = (id(asyncio.get_running_loop()), hashlib.sha256(
@@ -85,8 +95,13 @@ class ClaudeLlm(GeneralLlm):
             extra = {"thinking": {"type": "adaptive"}, "output_config": {"effort": self.effort}}
         if system_prompt:
             extra["system"] = system_prompt
+        if self.gate is not None and not self.gate():
+            raise RuntimeError("claude gate closed")
+        client_kwargs = {"timeout": self.request_timeout}
+        if self.max_retries is not None:
+            client_kwargs["max_retries"] = self.max_retries
         started = time.monotonic()
-        async with anthropic.AsyncAnthropic(timeout=self.request_timeout) as client:
+        async with anthropic.AsyncAnthropic(**client_kwargs) as client:
             response = await client.beta.messages.create(
                 model=self.api_model,
                 max_tokens=self.max_tokens,

@@ -105,6 +105,65 @@ def budget_forecaster():
     ])
 
 
+#: The boost model's output limit, thinking included. Anthropic's migration
+#: guide (Migrating to Claude Fable 5.1 / 5.2, as of 2026-11): Fable's thinking
+#: is always on, max_tokens caps thinking plus reply, and "at high and above
+#: set a large max_tokens" -- ClaudeLlm's 16000 could end a long think with
+#: stop_reason=max_tokens and no text. 32000 for the boost only (2026-11-22).
+#: Not streamed: the guide advises streaming above ~16K against HTTP
+#: timeouts, but ClaudeLlm passes its own timeout, which bounds the call
+#: (the SDK's 10-minute guard only applies to its default timeout), and a
+#: timeout hands the sample to Opus.
+BOOST_MAX_TOKENS = 32000
+
+
+def boost_forecaster(boost: spend.ForecasterBoost):
+    """The forecaster while spend.forecaster_boost is on: the boost model
+    (Fable 5.2) at effort "high", then the pinned forecaster's Opus at its own
+    effort, then Sonnet, so a refusal, a timeout or the cap hands the sample
+    to what production forecasts with anyway.
+
+    Fable 5.2 accepts what ClaudeLlm sends, per Anthropic's migration guide
+    (2026-11): thinking {"type": "adaptive"} (thinking is always on there;
+    "disabled" or a budget_tokens would be a 400) and output_config.effort
+    "high", the level the guide says to start Fable at."""
+    # Modules, as in budget_forecaster. pin_models is standard library only;
+    # its Opus effort is production's (FORECASTER_REASONING_OPUS reaches only
+    # the Test Bot pin step, not this process).
+    from backtest import claude_llm, fallback_llm, pin_models
+
+    timeout = pin_models.FORECASTER_TIMEOUT_SECONDS
+    opus = pin_models.OPUS_FORECASTER
+    return fallback_llm.FallbackLlm([
+        # No SDK retries: a timeout retried twice would hold the sample for
+        # three times 420 s before Opus is asked.
+        claude_llm.ClaudeLlm(model=boost.model, effort="high", timeout=timeout,
+                             max_tokens=BOOST_MAX_TOKENS, max_retries=0,
+                             gate=lambda: spend.boost_room(boost.model, boost.cap)),
+        claude_llm.ClaudeLlm(model=opus, effort=pin_models.FORECASTER_REASONING[opus], timeout=timeout),
+        claude_llm.ClaudeLlm(model=spend.BUDGET_FORECASTER,
+                             effort=pin_models.FORECASTER_REASONING[spend.BUDGET_FORECASTER],
+                             timeout=timeout),
+    ])
+
+
+def apply_forecaster_boost(bot, tournament: str) -> bool:
+    """Hand ``bot`` the boost forecaster and its sample count when
+    spend.forecaster_boost is on for ``tournament``; leave it untouched (and
+    say nothing) when it is off. Called after forecast_with_opus, which
+    resets both for the next tournament."""
+    boost = spend.forecaster_boost(tournament=tournament)
+    if boost is None:
+        return False
+    bot.cheap_forecast = False
+    bot.forecaster_override = boost_forecaster(boost)
+    bot.predictions_per_research_report = boost.samples
+    # Counts only. The model went through engine_for, so it is a known id.
+    logger.info("forecaster_boost model=%s samples=%d spent=%.2f cap=%.2f",
+                boost.model.partition("/")[2], boost.samples, boost.spent, boost.cap)
+    return True
+
+
 class SummerTemplateBot2026(ForecastBot):
     """
     This is the template bot for Summer 2026 Metaculus AI Tournament.
@@ -1410,6 +1469,9 @@ if __name__ == "__main__":
         forecast_with_opus(wide=True)
         template_bot.resolution_spec = True
         template_bot.asknews_mode = "full"
+        # Fable while FORECASTER_BOOST_* say so (spend.forecaster_boost);
+        # MiniBench's forecast_with_opus below puts the chain back.
+        apply_forecaster_boost(template_bot, "futureeval")
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 tournaments.FUTUREEVAL.id, return_exceptions=True
@@ -1478,6 +1540,9 @@ if __name__ == "__main__":
         forecast_with_opus(wide=True)
         template_bot.resolution_spec = True
         template_bot.asknews_mode = "latest"
+        # The scored final only; forecast_with_haiku below puts the early
+        # safety net back on Haiku.
+        apply_forecaster_boost(template_bot, "market_pulse")
         forecast_reports = asyncio.run(
             template_bot.forecast_questions(final, return_exceptions=True)
         ) if final else []
@@ -1496,6 +1561,9 @@ if __name__ == "__main__":
         # https://www.metaculus.com/tournament/bot-testing-area/
         template_bot.skip_previously_forecasted_questions = False
         spend.set_tournament("test")
+        # Test Bot's forecaster=fable input: measure the boost before
+        # production turns it on.
+        apply_forecaster_boost(template_bot, "test")
         forecast_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 "bot-testing-area", return_exceptions=True

@@ -294,6 +294,15 @@ jobs:
           ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY || secrets.ASKNEWS }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # Forecaster boost (spend.forecaster_boost, 2026-11-22): Fable 5.2
+          # forecasts FutureEval while MODEL and UNTIL (an ISO date, inclusive)
+          # are both set, up to MAX_USD of Fable rows in the ledger. Repository
+          # variables; unset is today's chain. Here and on the Market Pulse
+          # step (its final forecast), not on the Cup or the pin step.
+          FORECASTER_BOOST_MODEL: ${{ vars.FORECASTER_BOOST_MODEL || '' }}
+          FORECASTER_BOOST_UNTIL: ${{ vars.FORECASTER_BOOST_UNTIL || '' }}
+          FORECASTER_BOOST_SAMPLES: ${{ vars.FORECASTER_BOOST_SAMPLES || '' }}
+          FORECASTER_BOOST_MAX_USD: ${{ vars.FORECASTER_BOOST_MAX_USD || '' }}
               # before being wired in; absent keys simply disable their leg.
           # See the R11 note on the pin step above: one Gemini credential,
           # on purpose.
@@ -329,6 +338,12 @@ jobs:
           ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY || secrets.ASKNEWS }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # The forecaster boost, as on "Run bot": main.py gives it to the
+          # final forecast only, never to the early safety net.
+          FORECASTER_BOOST_MODEL: ${{ vars.FORECASTER_BOOST_MODEL || '' }}
+          FORECASTER_BOOST_UNTIL: ${{ vars.FORECASTER_BOOST_UNTIL || '' }}
+          FORECASTER_BOOST_SAMPLES: ${{ vars.FORECASTER_BOOST_SAMPLES || '' }}
+          FORECASTER_BOOST_MAX_USD: ${{ vars.FORECASTER_BOOST_MAX_USD || '' }}
       # PRACTICE, NOT PRIZES. Metaculus Cup Fall 2026 (tournaments.METACULUS_CUP)
       # ranks bots against the human crowd but pays none; the FutureEval
       # resources page recommends it for measuring a bot on diverse questions.
