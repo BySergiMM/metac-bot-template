@@ -218,6 +218,11 @@ class OperationalMessagesSurviveTests(RedactionHarness):
         "out=1840 usd=0.0478 stop=end_turn secs=31.4",
         "sample_failed type=RuntimeError qtype=binary",
         "prize_forecasts opus=3 wide=5",
+        # The forecaster boost (2026-11-22): counts and a fixed reason word.
+        "forecaster_boost model=claude-fable-5-2 samples=5 spent=3.42 cap=20.00",
+        "forecaster_boost_off reason=cap",
+        "claude_llm model=claude-fable-5-2 effort=high in=24310 cache_read=23950 "
+        "out=6120 usd=0.4410 stop=end_turn secs=88.0",
         "Retrieved 3 questions from tournament 33022",
         "Retrieving questions from tournament minibench",
         "discovery_complete tournament=minibench pages=3 questions=250 "

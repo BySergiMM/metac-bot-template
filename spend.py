@@ -40,13 +40,14 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +482,152 @@ BUDGET_FORECASTER = "anthropic/claude-sonnet-5-5"
 #: Behind it when Sonnet refuses, times out or errors, as in the pinned chain.
 BUDGET_FORECASTER_FALLBACK = "anthropic/claude-haiku-5-5"
 
+
+############################## FORECASTER BOOST ##############################
+# A dated, dollar-capped switch that makes another model -- Fable 5.2 -- the
+# forecaster of FutureEval and Market Pulse's final forecast (2026-11-22). The
+# owner's credit lapses unused on 30 Nov, and no one has measured Fable on
+# these questions; Metaculus' reference Fable template reports ~$1.96 a
+# question, against our ~$0.30, so the cap is what keeps one batch from
+# eating the month. Off unless both FORECASTER_BOOST_MODEL and
+# FORECASTER_BOOST_UNTIL are set (repository variables), and off again on its
+# own after UNTIL. Every doubt turns it off: off is today's chain, which is
+# the safe side.
+
+#: Where the boost may forecast: the two that pay and are scored on the
+#: forecast it would make, and Test Bot's practice questions. Never
+#: MiniBench, Market Pulse's early safety net or the Cup.
+BOOST_TOURNAMENTS = ("futureeval", "market_pulse", "test")
+BOOST_SAMPLES = 5
+BOOST_MAX_USD = 20.0
+
+
+class ForecasterBoost(NamedTuple):
+    model: str      # "anthropic/<api id>", as ClaudeLlm takes it
+    samples: int    # forecasts per question
+    spent: float    # dollars the ledger already holds for this model
+    cap: float      # FORECASTER_BOOST_MAX_USD
+
+
+_boost_noted: set[str] = set()
+
+
+def _boost_off(reason: str, warn: bool = False) -> None:
+    """One line per reason and process, a fixed word: never the variable's
+    value, which nothing here has vetted."""
+    if reason not in _boost_noted:
+        _boost_noted.add(reason)
+        (logger.warning if warn else logger.info)("forecaster_boost_off reason=%s", reason)
+
+
+def _boost_until(raw: str) -> datetime | None:
+    """The end of FORECASTER_BOOST_UNTIL's UTC day (inclusive), or None."""
+    try:
+        day = datetime.strptime(raw.strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    return day.replace(tzinfo=timezone.utc) + timedelta(days=1)
+
+
+def _boost_samples() -> int:
+    try:
+        samples = int(os.environ.get("FORECASTER_BOOST_SAMPLES", "").strip() or BOOST_SAMPLES)
+    except ValueError:
+        return BOOST_SAMPLES
+    return min(max(samples, 1), BOOST_SAMPLES)
+
+
+def _boost_cap() -> float:
+    cap = _float_env("FORECASTER_BOOST_MAX_USD", BOOST_MAX_USD)
+    # nan never compares >= anything, so it would be no cap at all.
+    return cap if math.isfinite(cap) else BOOST_MAX_USD
+
+
+def boost_spent(lines: Iterable[dict], model: str) -> float:
+    """Every dollar the ledger holds for ``model``, in any phase, tournament
+    or cycle. Over the whole file, not this cycle: the cycle resets on the
+    28th and the credit lapses on the 30th, and month_spend would hand the cap
+    back in between. The file keeps KEEP_DAYS (70) of lines whatever the
+    cycle, longer than any boost should last; a lost ledger (the 2026-10-30
+    reset) is caught by forecaster_boost's history check."""
+    names = {model, model.partition("/")[2]}
+    return sum(l.get("usd", 0.0) for l in calls(lines) if l.get("model") in names)
+
+
+def forecaster_boost(now: datetime | None = None,
+                     tournament: str | None = None) -> ForecasterBoost | None:
+    """The boost to apply to ``tournament`` (default: the one set_tournament
+    named), or None for today's chain. None when unset, without UNTIL, after
+    UNTIL's day, for a model without a price row (backtest.claude_llm's), in
+    any other tournament, once over_budget, while the cycle's pace reaches the
+    budget (prize_forecasts' tight tier), without a ledger history outside
+    Test Bot (its cap would read zero), and once the cap is reached. None on
+    any error."""
+    try:
+        model = os.environ.get("FORECASTER_BOOST_MODEL", "").strip()
+        if not model:
+            return None
+        now = now or datetime.now(timezone.utc)
+        raw_until = os.environ.get("FORECASTER_BOOST_UNTIL", "").strip()
+        if not raw_until:
+            _boost_off("no_until")
+            return None
+        until = _boost_until(raw_until)
+        if until is None:
+            _boost_off("bad_date", warn=True)
+            return None
+        if now >= until:
+            _boost_off("expired")
+            return None
+        if not model.startswith("anthropic/"):
+            _boost_off("unpriced", warn=True)
+            return None
+        try:
+            from backtest.claude_llm import engine_for
+
+            engine_for(model.partition("/")[2])
+        except ValueError:
+            _boost_off("unpriced", warn=True)
+            return None
+        tournament = tournament if tournament is not None else _tournament
+        if tournament not in BOOST_TOURNAMENTS:
+            return None
+        if over_budget(now):
+            _boost_off("over_budget")
+            return None
+        lines = load()
+        if tournament != "test" and history_start(lines) is None:
+            # Production restores its ledger from the Actions cache; a failed
+            # restore starts an empty one, which would read as $0 spent.
+            _boost_off("no_history")
+            return None
+        pace = projection(month_spend(lines, now), now, counted_since(lines, now))
+        if pace is not None and pace >= budget_usd(now):
+            _boost_off("pace")
+            return None
+        cap = _boost_cap()
+        spent = boost_spent(lines, model)
+        if spent >= cap:
+            _boost_off("cap")
+            return None
+        return ForecasterBoost(model, _boost_samples(), spent, cap)
+    except Exception as exc:  # noqa: BLE001 - off is today's behaviour
+        _warn_once("boost", exc)
+        return None
+
+
+def boost_room(model: str, cap: float) -> bool:
+    """Whether the boost model may take one more call: checked before each
+    one (main.boost_forecaster), because a FutureEval batch is forecast in one
+    run and five Fable samples a question would carry it well past a cap read
+    only at the start. The overshoot is what is in flight at once. False on
+    any error: the next model in the chain answers."""
+    try:
+        return boost_spent(load(), model) < cap
+    except Exception as exc:  # noqa: BLE001
+        _warn_once("boost", exc)
+        return False
+
 #: Where the forecasters should be Opus while there is budget.
 OPUS_TOURNAMENTS = ("futureeval", "market_pulse", "minibench")
 
@@ -491,7 +638,9 @@ def degraded_forecasts(lines: list[dict], run_id: str | None) -> list[str]:
     forecast = [l for l in calls(lines) if run_id and l.get("run") == run_id
                 and l.get("phase") == "forecast" and l.get("tour") in OPUS_TOURNAMENTS]
     models = sorted({str(l.get("model")) for l in forecast})
-    return [] if not models or any("opus" in m for m in models) else models
+    # Fable is the forecaster while the boost is on (forecaster_boost), and
+    # stronger than Opus: a run it forecast alone is not the 2026-10-25 kind.
+    return [] if not models or any("opus" in m or "fable" in m for m in models) else models
 
 
 ############################## MESSAGES ##############################
