@@ -443,29 +443,43 @@ def room_for_extras(now: datetime | None = None) -> bool:
 PRIZE_FORECASTS = 3
 PRIZE_FORECASTS_TIGHT = 2
 
+#: FutureEval and Market Pulse's final forecast get five (three when tight),
+#: since 2026-11-22. FutureEval question 46627 lost two of its three and was
+#: researched and paid for twice; Metaculus' own template takes the median of
+#: five. The extra two read the first one's prompt cache
+#: (backtest/claude_llm.py), about $0.09 a question. MiniBench, at four
+#: questions a day, stays at three.
+WIDE_TOURNAMENTS = ("futureeval", "market_pulse")
+WIDE_FORECASTS = 5
+WIDE_FORECASTS_TIGHT = 3
 
-def prize_forecasts(now: datetime | None = None) -> int:
-    """How many Opus forecasts a prize question gets: PRIZE_FORECASTS, fewer
-    while the cycle's projected spend reaches the budget, 0 once over_budget
-    (Haiku then, see main.py). Claude is the only key, so this is what keeps
-    the month inside it. PRIZE_FORECASTS on any error or without a day of data:
-    over_budget still stops it."""
+
+def prize_forecasts(now: datetime | None = None, tournament: str | None = None) -> int:
+    """How many Opus forecasts a prize question gets: PRIZE_FORECASTS
+    (WIDE_FORECASTS in WIDE_TOURNAMENTS), fewer while the cycle's projected
+    spend reaches the budget, 0 once over_budget (Sonnet then, see main.py).
+    Claude is the only key, so this is what keeps the month inside it. The
+    full count on any error or without a day of data: over_budget still stops
+    it."""
     now = now or datetime.now(timezone.utc)
+    wide = tournament in WIDE_TOURNAMENTS
     if over_budget(now):
         return 0
     try:
         lines = load()
         pace = projection(month_spend(lines, now), now, counted_since(lines, now))
         if pace is not None and pace >= budget_usd(now):
-            return PRIZE_FORECASTS_TIGHT
+            return WIDE_FORECASTS_TIGHT if wide else PRIZE_FORECASTS_TIGHT
     except Exception as exc:  # noqa: BLE001
         _warn_once("plan", exc)
-    return PRIZE_FORECASTS
+    return WIDE_FORECASTS if wide else PRIZE_FORECASTS
 
 
 #: The prize tournaments' forecaster once over budget (main.budget_forecaster):
 #: Sonnet 5.5 at high effort, about half Opus's price, instead of Haiku.
 BUDGET_FORECASTER = "anthropic/claude-sonnet-5-5"
+#: Behind it when Sonnet refuses, times out or errors, as in the pinned chain.
+BUDGET_FORECASTER_FALLBACK = "anthropic/claude-haiku-5-5"
 
 #: Where the forecasters should be Opus while there is budget.
 OPUS_TOURNAMENTS = ("futureeval", "market_pulse", "minibench")

@@ -213,6 +213,11 @@ class OperationalMessagesSurviveTests(RedactionHarness):
     operator or an audit reads out of a production log."""
 
     SURVIVORS = [
+        # Counts only (2026-11-22): per forecaster call, and per failed sample.
+        "claude_llm model=claude-opus-5-5 effort=high in=24310 cache_read=23950 "
+        "out=1840 usd=0.0478 stop=end_turn secs=31.4",
+        "sample_failed type=RuntimeError qtype=binary",
+        "prize_forecasts opus=3 wide=5",
         "Retrieved 3 questions from tournament 33022",
         "Retrieving questions from tournament minibench",
         "discovery_complete tournament=minibench pages=3 questions=250 "

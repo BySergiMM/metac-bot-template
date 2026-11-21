@@ -42,6 +42,23 @@ class RegisterModelPricesTests(unittest.TestCase):
         api_id = pin_models.DEFAULTS["default"].partition("/")[2]
         self.assertIn(api_id, [e.model for e in claude_research.ENGINES.values()])
 
+    def test_fable_is_priced_but_forecasts_nothing_by_default(self):
+        """Fable 5.2, added 2026-11-22 so ClaudeLlm can name it: $8/$40 per
+        M, cache hits $0.20/M (0.025x), dynamic-filtering web search,
+        server-side fallbacks. Nothing pins it."""
+        import claude_research
+
+        fable = claude_research.ENGINES["fable"]
+        self.assertEqual(fable.model, "claude-fable-5-2")
+        self.assertAlmostEqual(fable.price_in, 8e-6)
+        self.assertAlmostEqual(fable.price_out, 40e-6)
+        self.assertAlmostEqual(fable.cache_read * fable.price_in, 0.20e-6)
+        self.assertEqual(fable.web_search, "web_search_20260209")
+        self.assertTrue(fable.fallbacks)
+        self.assertIn(("fable", "full"), claude_research.ROUNDS)
+        self.assertNotEqual(claude_research.DEFAULT_ENGINE, "fable")
+        self.assertNotIn("fable", " ".join(pin_models.DEFAULTS.values()))
+
     def test_a_missing_model_is_registered_at_the_verified_price(self):
         litellm.model_cost.pop(OPUS, None)
         registered = bot_helpers.register_model_prices()
